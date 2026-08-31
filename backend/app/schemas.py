@@ -1,0 +1,128 @@
+from datetime import date
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
+
+class TravelPlanRequest(BaseModel):
+    destination: str = Field(..., min_length=2, description="Destination city or country")
+    origin: str = Field(..., min_length=2, description="Origin city or airport")
+    start_date: date = Field(..., description="Trip start date")
+    end_date: date = Field(..., description="Trip end date")
+    travelers: int = Field(1, ge=1, description="Number of travelers")
+    total_budget_usd: float = Field(..., gt=0, description="Total trip budget in USD")
+    interests: List[str] = Field(default_factory=list, description="Travel interest tags")
+    travel_style: str = Field("balanced", description="budget | balanced | luxury")
+    cover_nearby: Optional[bool] = Field(True, description="Whether to include nearby places/day trips when days allow")
+    dietary_notes: Optional[str] = Field(None, description="Dietary restrictions or preferences")
+    mobility_notes: Optional[str] = Field(None, description="Mobility constraints")
+    free_text: Optional[str] = Field(None, description="Additional natural-language context")
+
+
+class ParsedTravelRequest(BaseModel):
+    destination: str
+    origin: Optional[str]
+    start_date: date
+    end_date: date
+    travelers: int
+    total_budget_usd: float
+    interests: List[str]
+    travel_style: str
+    flights_needed: bool
+    number_of_days: int
+    extra_notes: Optional[str]
+
+
+class TransitLeg(BaseModel):
+    day_number: Optional[int] = Field(None, description="Day this leg belongs to")
+    from_location: str
+    to_location: str
+    mode: str = Field(..., description="flight | train | bus | metro | cab | walk")
+    provider: str
+    estimated_cost_usd: float
+    duration_minutes: int
+    notes: str
+
+
+class DraftItineraryDay(BaseModel):
+    day_number: int
+    date: str
+    region: str = Field(..., description="Region or area for the day, e.g., 'North Goa', 'Old Manali'")
+    base_location: str = Field(..., description="Where the hotel is for this night")
+    transit_from: Optional[str] = Field(None, description="Where the day starts, if different from base")
+    transit_to: Optional[str] = Field(None, description="Where the day ends, if different from base")
+    theme: str = Field(..., description="High-level theme for the day, e.g., 'beach day', 'heritage day'")
+    activity_focus: List[str] = Field(default_factory=list, description="Interest tags for this day")
+
+
+class DraftItinerary(BaseModel):
+    days: List[DraftItineraryDay]
+    transit_legs: List[TransitLeg] = Field(default_factory=list)
+    hotel_regions: List[str] = Field(default_factory=list, description="Distinct base locations where hotels are needed")
+
+
+class StayOption(BaseModel):
+    night_number: int
+    hotel_name: str
+    location: str
+    room_type: str
+    estimated_cost_usd: float
+    why_this_choice: str
+    booking_notes: str
+
+
+class ActivityItem(BaseModel):
+    time_slot: str = Field(..., description="e.g., 09:00 AM - 11:30 AM")
+    activity_name: str
+    location: str
+    category: str = Field(..., description="sightseeing | food | shopping | rest | transit")
+    estimated_cost_usd: float
+    notes: str
+
+
+class DayItinerary(BaseModel):
+    day_number: int
+    date: str
+    theme: str
+    region: Optional[str] = Field(None, description="Region or area for the day")
+    meals_included: List[str] = Field(default_factory=list, description="Meals included or planned for the day, e.g., ['breakfast', 'dinner']")
+    activities: List[ActivityItem]
+    transit_legs: List[TransitLeg]
+    stay: Optional[StayOption]
+    daily_transit_cost_usd: float
+    daily_activity_cost_usd: float
+    daily_stay_cost_usd: float
+    total_daily_cost_usd: float
+
+
+class MasterTravelItinerary(BaseModel):
+    destination: str
+    origin: Optional[str]
+    total_budget_usd: float
+    actual_calculated_cost_usd: float
+    currency: str = "USD"
+    travelers: int
+    days: List[DayItinerary]
+    transit_summary: str
+    stay_summary: str
+    sightseeing_summary: str
+    trip_scope: Optional[str] = Field(None, description="e.g., 'Goa + nearby day trips'")
+    inclusions: List[str] = Field(default_factory=list)
+    exclusions: List[str] = Field(default_factory=list)
+    notes: List[str]
+
+
+class TravelPlanResponse(BaseModel):
+    session_id: Optional[str] = None
+    status: str
+    itinerary: Optional[MasterTravelItinerary] = None
+    error: Optional[str] = None
+
+
+class PromptParseRequest(BaseModel):
+    prompt: str = Field(..., min_length=3, description="Free-text travel request")
+
+
+class PromptParseResponse(BaseModel):
+    extracted: dict = Field(default_factory=dict, description="Fields successfully extracted from the prompt")
+    missing: List[str] = Field(default_factory=list, description="Required fields still missing")
+    parsed: dict = Field(default_factory=dict, description="Full parsed object returned by the parser agent")

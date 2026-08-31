@@ -1,0 +1,105 @@
+from crewai import Agent
+from langchain_community.chat_models import ChatOllama
+
+from app.config import get_settings
+from app.crew.tools import (
+    distance_clustering_tool,
+    flight_search_tool,
+    ground_transport_tool,
+    hotel_search_tool,
+    attraction_search_tool,
+    async_web_search_tool,
+)
+
+settings = get_settings()
+
+# Use a local Ollama model. Ensure the model is pulled: `ollama pull gemma4:26b`
+primary_llm = ChatOllama(
+    base_url=settings.ollama_base_url,
+    model=settings.ollama_model,
+    temperature=0.3,
+)
+
+
+input_parser_agent = Agent(
+    role="Travel Request Parser",
+    goal="Extract clean, structured travel parameters from the user's raw input and output them as JSON.",
+    backstory=(
+        "You are a meticulous travel intake specialist. You read messy user messages and "
+        "extract destination, origin, dates, budget, travelers, interests, travel style, "
+        "dietary/mobility notes, and whether flights are needed. You always output valid JSON."
+    ),
+    memory=False,
+    verbose=True,
+    allow_delegation=False,
+    max_iter=5,
+    llm=primary_llm,
+)
+
+
+itinerary_architect_agent = Agent(
+    role="Itinerary Architect",
+    goal="Build a feasible day-by-day skeleton itinerary that decides region/base per day and required transit legs.",
+    backstory=(
+        "You are an expert route planner. Given a destination, origin, dates, interests, and optional "
+        "nearby places, you decide where the traveler sleeps each night and which region they explore each day. "
+        "You minimize hotel changes while avoiding backtracking. You output a strict JSON skeleton."
+    ),
+    memory=False,
+    verbose=True,
+    allow_delegation=False,
+    max_iter=5,
+    tools=[async_web_search_tool],
+    llm=primary_llm,
+)
+
+
+travel_planner_agent = Agent(
+    role="Transit & Logistics Planner",
+    goal="Plan all travel legs and output them as a JSON array.",
+    backstory=(
+        "You are a logistics expert. You know how to get travelers from origin to destination "
+        "and move them efficiently within the city using the cheapest suitable options for their style. "
+        "You always output a valid JSON array of transit legs."
+    ),
+    memory=False,
+    verbose=True,
+    allow_delegation=False,
+    max_iter=5,
+    tools=[flight_search_tool, ground_transport_tool, async_web_search_tool],
+    llm=primary_llm,
+)
+
+
+stay_planner_agent = Agent(
+    role="Accommodation Planner",
+    goal="Recommend accommodations and output them as a JSON array.",
+    backstory=(
+        "You are a hospitality curator. You match travelers with stays that fit their budget, "
+        "location needs, and travel style, and you explain why each choice works. "
+        "You always output a valid JSON array of stay options."
+    ),
+    memory=False,
+    verbose=True,
+    allow_delegation=False,
+    max_iter=5,
+    tools=[hotel_search_tool, async_web_search_tool],
+    llm=primary_llm,
+)
+
+
+sightseeing_planner_agent = Agent(
+    role="Sightseeing & Activities Planner",
+    goal="Build a day-by-day activity plan and output it as a JSON array.",
+    backstory=(
+        "You are a passionate local guide. You know the must-see sights, hidden gems, "
+        "and best food spots, and you cluster them geographically to avoid backtracking. "
+        "You always output a valid JSON array of day objects with activities."
+    ),
+    memory=False,
+    verbose=True,
+    allow_delegation=False,
+    max_iter=5,
+    tools=[attraction_search_tool, distance_clustering_tool, async_web_search_tool],
+    llm=primary_llm,
+)
