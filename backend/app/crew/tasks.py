@@ -5,6 +5,7 @@ from app.crew.agents import (
     travel_planner_agent,
     stay_planner_agent,
     sightseeing_planner_agent,
+    itinerary_assembler_agent,
 )
 
 
@@ -160,5 +161,44 @@ plan_sightseeing_task = Task(
     ),
     expected_output="A raw JSON array of day objects with real attractions.",
     agent=sightseeing_planner_agent,
+    context=[parse_input_task],
+)
+
+
+assemble_itinerary_task = Task(
+    description=(
+        "You are the Itinerary Assembler. Refine the baseline itinerary below using the route skeleton, "
+        "search context, and specialist outputs. Do NOT change the number of days, dates, or overall structure. "
+        "Your job is to improve quality: fix bad hotel names, relocate activities that are far from the day's region, "
+        "consolidate duplicate hotels, improve activity names with real places from the search context, and make sure costs are reasonable.\n\n"
+        "Destination: {destination}\n"
+        "Origin: {origin}\n"
+        "Travelers: {travelers}\n"
+        "Travel style: {travel_style}\n"
+        "Total budget (USD): {total_budget_usd}\n"
+        "Dietary notes: {dietary_notes}\n"
+        "Mobility notes: {mobility_notes}\n\n"
+        "Baseline itinerary (use this as your starting point): {baseline_itinerary}\n\n"
+        "Route skeleton (JSON): {skeleton}\n\n"
+        "Real search context (JSON): {search_context}\n\n"
+        "Transit legs (JSON array): {transit_raw}\n\n"
+        "Stay options (JSON array): {stay_raw}\n\n"
+        "Sightseeing days (JSON array): {sightseeing_raw}\n\n"
+        "Rules:\n"
+        "1. Keep exactly the same number of days and dates as the baseline.\n"
+        "2. Use the skeleton's region and theme for each day; do not change them unless the baseline is clearly wrong.\n"
+        "3. Replace generic or invalid hotel names (e.g., shops, restaurants, attractions) with real hotel names from the search context.\n"
+        "4. Replace generic activity names like 'Historic Downtown Walk' with real place names from the search context.\n"
+        "5. Match activities to the day's region; remove or relocate activities that are far away.\n"
+        "6. Consolidate consecutive nights at the same base to a single hotel.\n"
+        "7. Ensure every day has at least 2–3 activities with realistic time slots.\n"
+        "8. Keep arrival/return transit legs on day 1 and the last day.\n"
+        "9. Preserve meals_included and compute daily costs correctly: daily_transit + daily_activity + daily_stay = total_daily.\n"
+        "10. Keep top-level inclusions, exclusions, and notes.\n"
+        "11. Return ONLY raw JSON with no markdown or explanations.\n\n"
+        "Output shape (match the baseline exactly)."
+    ),
+    expected_output="A refined raw JSON object matching the MasterTravelItinerary schema.",
+    agent=itinerary_assembler_agent,
     context=[parse_input_task],
 )

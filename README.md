@@ -30,11 +30,30 @@ Deep-Agentic Autonomous Travel Planning System — MVP.
 
 ## Architecture
 
-This MVP follows the design in `architecture-mvp.md`:
+This MVP follows the design in `architecture-mvp.md`. It is a **hierarchical / parallel multi-agent travel planner** built with CrewAI and FastAPI:
 
-- **5-agent sequential CrewAI pipeline**: Input Parser → Travel Planner → Stay Planner → Sightseeing Planner → Itinerary Assembler
-- **FastAPI** backend with `POST /plan` and `GET /health`
+1. **Input Parser** extracts structured fields from free-text prompts.
+2. **Itinerary Architect** (supervisor) builds a day-by-day route skeleton.
+3. **Parallel Serper searches** fetch real flight, hotel, and attraction data per skeleton segment.
+4. **Specialist crews run in parallel**:
+   - Travel Planner — outbound/return and local transit
+   - Stay Planner — accommodation per base region
+   - Sightseeing Planner — activities and dining per day
+5. **Itinerary Assembler** merges and refines everything into the final itinerary.
+
+## API Endpoints
+
+- `GET /health` — health check
+- `POST /parse-prompt` — extract travel fields + missing list
+- `POST /plan` — generate a complete itinerary
+- `GET /plan/{session_id}/pdf` — download the itinerary as PDF
+
+## Tech Stack
+
+- **FastAPI** backend
+- **CrewAI** multi-agent orchestration
 - **React + TypeScript + Vite** frontend
-- Mocked external APIs (Serper, Amadeus, Booking, maps, E2B) with production hooks
+- **Serper** for live web search (flights, hotels, attractions)
+- Mocked external APIs (Amadeus, Booking, maps, E2B) with production hooks
 
 For the full enterprise design, see `architecture.md`.

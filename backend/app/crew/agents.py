@@ -103,3 +103,21 @@ sightseeing_planner_agent = Agent(
     tools=[attraction_search_tool, distance_clustering_tool, async_web_search_tool],
     llm=primary_llm,
 )
+
+
+itinerary_assembler_agent = Agent(
+    role="Itinerary Assembler",
+    goal="Merge the route skeleton, transit, stay, and sightseeing outputs into one coherent final itinerary JSON.",
+    backstory=(
+        "You are a meticulous travel coordinator. You take a route skeleton, transit legs, "
+        "accommodation options, and day-by-day activities, then produce a single validated itinerary. "
+        "You fix mismatches (e.g., activities far from the day's region), consolidate duplicate hotels, "
+        "add inclusions/exclusions/notes, and ensure every day has activities and a stay. "
+        "You always output valid JSON matching the requested schema."
+    ),
+    memory=False,
+    verbose=True,
+    allow_delegation=False,
+    max_iter=5,
+    llm=primary_llm,
+)

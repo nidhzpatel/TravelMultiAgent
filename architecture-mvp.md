@@ -19,7 +19,7 @@ This is the first runnable version. It favors clarity and end-to-end coverage ov
 ┌─────────────────────────────────────────────────────────────────────┐
 │                 FastAPI Gateway (Backend)                           │
 │  POST /parse-prompt  →  Extracted fields + missing list             │
-│  POST /plan          →  Hierarchical CrewAI Pipeline                │
+│  POST /plan          →  Hierarchical / Parallel CrewAI Pipeline     │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼─────────────────────────────────────┐
@@ -31,12 +31,13 @@ This is the first runnable version. It favors clarity and end-to-end coverage ov
 │  └────────┬────────┘                                                │
 │           │                                                         │
 │  ┌────────▼────────────┐                                            │
-│  │ Itinerary Architect │  Builds day-by-day skeleton: region/base   │
-│  │ Agent               │  per day, transit legs, activity themes    │
+│  │ Itinerary Architect │  Supervisor: builds day-by-day skeleton     │
+│  │ Agent               │  (region/base per day, transit legs,       │
+│  │                     │   activity themes, hotel regions)          │
 │  └────────┬────────────┘                                            │
 │           │                                                         │
 │  ┌────────▼─────────────────────────────────────────────────────┐   │
-│  │ Controlled Tool Orchestration (in main.py)                   │   │
+│  │ Controlled Search Orchestration (in main.py)                 │   │
 │  │  • FlightSearchTool (Serper) for outbound / return legs      │   │
 │  │  • HotelSearchTool (Serper) per base region                  │   │
 │  │  • AttractionSearchTool (Serper) per day/region              │   │
@@ -51,8 +52,10 @@ This is the first runnable version. It favors clarity and end-to-end coverage ov
 │  └────────┬────────────────────────────────────────────────────┘    │
 │           │                                                         │
 │  ┌────────▼─────────────┐                                           │
-│  │ Itinerary Assembler  │  Merges outputs, adds meals, region,     │
-│  │ (main.py)            │  inclusions/exclusions, cost totals      │
+│  │ Itinerary Assembler  │  Merges outputs, validates quality,      │
+│  │ Agent                │  adds meals, inclusions/exclusions,      │
+│  │                      │  cost totals (with deterministic         │
+│  │                      │  fallback in main.py)                    │
 │  └───────────────────────┘                                           │
 └─────────────────────────────────────────────────────────────────────┘
                                 │
@@ -220,6 +223,23 @@ class ActivityItem(BaseModel):
 
 ---
 
+### Agent 6 — Itinerary Assembler
+
+**Responsibility:** Merge all specialist outputs into the final itinerary.
+
+**Tasks:**
+- Align each day with the skeleton's region and theme
+- Match stays to the skeleton's base locations
+- Relocate activities that are far from the day's region
+- Consolidate duplicate hotels across consecutive nights
+- Add meals, inclusions, exclusions, and notes
+- Compute daily and total costs
+- Fall back to deterministic assembly if the output is malformed
+
+**Output:** `MasterTravelItinerary`
+
+---
+
 ## 5. Data Models
 
 ```python
@@ -274,11 +294,12 @@ class DayItinerary(BaseModel):
 1. **User submits free-text prompt** → `POST /parse-prompt`
 2. **Input Parser Agent** extracts fields; backend returns `extracted` + `missing`
 3. **Frontend asks only missing fields**, then submits structured request → `POST /plan`
-4. **Itinerary Architect Agent** builds the route skeleton
-5. **Controlled tool orchestration** calls Serper for flights, hotels, and attractions per skeleton segment
-6. **Travel / Stay / Sightseeing crews** run in parallel using skeleton + search context
-7. **Itinerary Assembler (main.py)** merges outputs, adds meals/region/inclusions/exclusions, computes costs
-8. **FastAPI returns** `MasterTravelItinerary`
+4. **Itinerary Architect Agent** (supervisor) builds the route skeleton
+5. **Controlled search orchestration** calls Serper for flights, hotels, and attractions per skeleton segment
+6. **Travel / Stay / Sightseeing specialist crews** run in parallel using skeleton + search context
+7. **Itinerary Assembler Agent** merges outputs, fixes mismatches, adds meals/region/inclusions/exclusions, computes costs
+8. **Deterministic fallback** in `main.py` validates the assembler output and rebuilds if it is malformed
+9. **FastAPI returns** `MasterTravelItinerary`
 
 ---
 

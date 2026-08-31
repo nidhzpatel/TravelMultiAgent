@@ -31,6 +31,7 @@ from app.crew.crew import (
     build_travel_crew,
     build_stay_crew,
     build_sightseeing_crew,
+    build_assembly_crew,
 )
 from app.crew.tools import (
     flight_search_tool,
@@ -803,6 +804,64 @@ def _build_itinerary(
     )
 
 
+def _is_valid_assembler_output(data: dict, request: TravelPlanRequest) -> bool:
+    """Sanity-check the assembler's JSON before accepting it."""
+    if not isinstance(data, dict):
+        return False
+    expected_days = (request.end_date - request.start_date).days + 1
+    days = data.get("days")
+    if not isinstance(days, list) or len(days) != expected_days:
+        return False
+    if data.get("actual_calculated_cost_usd") in (None, 0, 0.0):
+        return False
+    return True
+
+
+async def _assemble_itinerary_with_crew(
+    request: TravelPlanRequest,
+    draft: DraftItinerary,
+    parsed_raw: str,
+    transit_raw: str,
+    stay_raw: str,
+    sightseeing_raw: str,
+    search_context: dict[str, str],
+) -> MasterTravelItinerary:
+    """Run the Itinerary Assembler crew to refine a deterministic baseline itinerary."""
+    # Start from a deterministic, schema-correct baseline.
+    baseline = _build_itinerary(
+        request,
+        draft=draft,
+        parsed_raw=parsed_raw,
+        transit_raw=transit_raw,
+        stay_raw=stay_raw,
+        sightseeing_raw=sightseeing_raw,
+        search_context=search_context,
+    )
+
+    inputs = _build_inputs(request)
+    enriched_inputs = {
+        **inputs,
+        "skeleton": draft.model_dump_json(),
+        "search_context": json.dumps(search_context, indent=2),
+        "transit_raw": transit_raw,
+        "stay_raw": stay_raw,
+        "sightseeing_raw": sightseeing_raw,
+        "baseline_itinerary": baseline.model_dump_json(),
+    }
+
+    try:
+        crew = build_assembly_crew()
+        result = await crew.kickoff_async(inputs=enriched_inputs)
+        raw_output = str(result.tasks_output[0]) if result and hasattr(result, "tasks_output") and result.tasks_output else "{}"
+        data = _extract_json(raw_output)
+        if _is_valid_assembler_output(data, request):
+            return MasterTravelItinerary(**data)
+    except Exception:
+        pass
+
+    return baseline
+
+
 def _pdf_text(text: str | None) -> str:
     """Sanitize text so fpdf's built-in Helvetica font can render it."""
     if text is None:
@@ -1220,20 +1279,20 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
     parsed_raw = _build_parsed_raw(plan_request)
 
     try:
-        # Step 1: hierarchical skeleton.
+        # Phase 1: Itinerary Architect builds the route skeleton.
         draft = await _build_draft_itinerary(plan_request, inputs)
 
-        # Step 2: controlled real-data searches per skeleton segment.
+        # Phase 2: Parallel Serper searches per skeleton segment.
         search_context = await _run_search_tools(plan_request, draft)
 
-        # Step 3: enrich agent inputs with skeleton + search context.
+        # Phase 3: Enrich inputs with skeleton + search context for specialists.
         enriched_inputs = {
             **inputs,
             "skeleton": draft.model_dump_json(),
             "search_context": json.dumps(search_context, indent=2),
         }
 
-        # Step 4: run specialist crews with full context.
+        # Phase 4: Run specialist crews in parallel.
         travel_crew = build_travel_crew()
         stay_crew = build_stay_crew()
         sightseeing_crew = build_sightseeing_crew()
@@ -1250,7 +1309,8 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
             str(sightseeing_result.tasks_output[0]) if sightseeing_result and hasattr(sightseeing_result, "tasks_output") and sightseeing_result.tasks_output else "[]",
         ]
 
-        itinerary = _build_itinerary(
+        # Phase 5: Itinerary Assembler refines the deterministic baseline into the final itinerary.
+        itinerary = await _assemble_itinerary_with_crew(
             plan_request,
             draft=draft,
             parsed_raw=parsed_raw,
