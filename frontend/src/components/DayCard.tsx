@@ -3,9 +3,25 @@ import { Bed, Bus, MapPin, Clock, Coffee, Camera, ShoppingBag, Moon, Utensils } 
 import TiltCard from './TiltCard'
 import type { DayItinerary } from '../types'
 
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: '$',
+  INR: '₹',
+  EUR: '€',
+  GBP: '£',
+  AED: 'AED ',
+  JPY: '¥',
+  AUD: 'A$',
+  CAD: 'C$',
+}
+
+function currencySymbol(code: string) {
+  return CURRENCY_SYMBOLS[code] || `${code} `
+}
+
 interface DayCardProps {
   day: DayItinerary
   index: number
+  currency?: string
 }
 
 const categoryIcons: Record<string, React.ReactNode> = {
@@ -24,7 +40,8 @@ const categoryColors: Record<string, string> = {
   transit: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
 }
 
-export default function DayCard({ day, index }: DayCardProps) {
+export default function DayCard({ day, index, currency = 'USD' }: DayCardProps) {
+  const symbol = currencySymbol(currency)
   return (
     <motion.div
       initial={{ opacity: 0, y: 30 }}
@@ -55,7 +72,7 @@ export default function DayCard({ day, index }: DayCardProps) {
               <p className="font-semibold text-white">{day.stay.hotel_name}</p>
               <p className="text-sm text-slate-400">{day.stay.location} · {day.stay.room_type}</p>
               <p className="mt-1 text-sm font-medium text-emerald-400">
-                ${day.stay.estimated_cost_usd.toLocaleString()}
+                {symbol}{day.stay.estimated_cost.toLocaleString()}
               </p>
             </div>
           </div>
@@ -80,7 +97,7 @@ export default function DayCard({ day, index }: DayCardProps) {
                     </div>
                     <div className="mt-1 flex items-center gap-3 text-xs text-slate-400">
                       <span className="flex items-center gap-1"><Clock size={12} /> {leg.duration_minutes} min</span>
-                      <span>${leg.estimated_cost_usd.toLocaleString()}</span>
+                      <span>{symbol}{leg.estimated_cost.toLocaleString()}</span>
                     </div>
                     {leg.notes && <p className="mt-1 text-xs text-slate-500">{leg.notes}</p>}
                   </div>
@@ -118,7 +135,7 @@ export default function DayCard({ day, index }: DayCardProps) {
                     {activity.notes && <p className="mt-1 text-xs text-slate-500">{activity.notes}</p>}
                   </div>
                   <p className="text-sm font-medium text-emerald-400">
-                    ${activity.estimated_cost_usd.toLocaleString()}
+                    {symbol}{activity.estimated_cost.toLocaleString()}
                   </p>
                 </div>
               ))}
@@ -135,7 +152,7 @@ export default function DayCard({ day, index }: DayCardProps) {
 
         <div className="mt-5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-3">
           <span className="text-sm text-slate-400">Daily total</span>
-          <span className="text-lg font-bold text-white">${day.total_daily_cost_usd.toLocaleString()}</span>
+          <span className="text-lg font-bold text-white">{symbol}{day.total_daily_cost.toLocaleString()}</span>
         </div>
       </div>
       </TiltCard>

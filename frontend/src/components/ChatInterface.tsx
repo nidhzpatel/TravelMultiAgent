@@ -161,6 +161,9 @@ export default function ChatInterface({
         end_date: finalAnswers.end_date || '',
         travelers: Number(finalAnswers.travelers) || 1,
         total_budget_usd: Number(finalAnswers.total_budget_usd) || 1,
+        currency: (finalAnswers.currency as string) || 'USD',
+        total_budget: Number(finalAnswers.total_budget) || Number(finalAnswers.total_budget_usd) || 1,
+        exchange_rate: Number(finalAnswers.exchange_rate) || 1,
         interests: normalizeInterests(finalAnswers.interests),
         travel_style: (finalAnswers.travel_style as string) || 'balanced',
         cover_nearby:

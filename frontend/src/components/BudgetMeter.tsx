@@ -1,6 +1,21 @@
 import { motion } from 'framer-motion'
 import AnimatedNumber from './AnimatedNumber'
 
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: '$',
+  INR: '₹',
+  EUR: '€',
+  GBP: '£',
+  AED: 'AED ',
+  JPY: '¥',
+  AUD: 'A$',
+  CAD: 'C$',
+}
+
+function currencySymbol(code: string) {
+  return CURRENCY_SYMBOLS[code] || `${code} `
+}
+
 interface BudgetMeterProps {
   budget: number
   actual: number
@@ -8,6 +23,7 @@ interface BudgetMeterProps {
 }
 
 export default function BudgetMeter({ budget, actual, currency = 'USD' }: BudgetMeterProps) {
+  const symbol = currencySymbol(currency)
   const percentage = Math.min((actual / budget) * 100, 100)
   const remaining = Math.max(budget - actual, 0)
 
@@ -21,14 +37,14 @@ export default function BudgetMeter({ budget, actual, currency = 'USD' }: Budget
         <div>
           <p className="text-sm text-slate-400">Estimated total</p>
           <p className="text-3xl font-bold text-white">
-            <AnimatedNumber value={actual} prefix="$" className="text-3xl font-bold text-white" />
+            <AnimatedNumber value={actual} prefix={symbol} className="text-3xl font-bold text-white" />
             <span className="text-base font-normal text-slate-400"> {currency}</span>
           </p>
         </div>
         <div className="text-right">
           <p className="text-sm text-slate-400">Budget</p>
           <p className="text-xl font-semibold text-white">
-            ${budget.toLocaleString()} {currency}
+            {symbol}{budget.toLocaleString()} {currency}
           </p>
         </div>
       </div>
@@ -45,10 +61,10 @@ export default function BudgetMeter({ budget, actual, currency = 'USD' }: Budget
       <div className="mt-3 flex items-center justify-between text-sm">
         <span className={percentage > 100 ? 'text-rose-400' : 'text-emerald-400'}>
           {percentage > 100
-            ? `$${(actual - budget).toLocaleString()} over budget`
+            ? `${symbol}${(actual - budget).toLocaleString()} over budget`
             : `${percentage.toFixed(0)}% of budget used`}
         </span>
-        <span className="text-slate-400">${remaining.toLocaleString()} remaining</span>
+        <span className="text-slate-400">{symbol}{remaining.toLocaleString()} remaining</span>
       </div>
     </div>
   )

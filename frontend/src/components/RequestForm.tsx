@@ -30,6 +30,9 @@ export default function RequestForm({ onSubmit, isLoading }: RequestFormProps) {
       end_date: endDate,
       travelers,
       total_budget_usd: budget,
+      currency: 'USD',
+      total_budget: budget,
+      exchange_rate: 1,
       interests: interests
         .split(',')
         .map((i) => i.trim())

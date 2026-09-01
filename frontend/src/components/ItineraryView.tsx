@@ -17,8 +17,24 @@ interface ItineraryViewProps {
   onReset: () => void
 }
 
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: '$',
+  INR: '₹',
+  EUR: '€',
+  GBP: '£',
+  AED: 'AED ',
+  JPY: '¥',
+  AUD: 'A$',
+  CAD: 'C$',
+}
+
+function currencySymbol(code: string) {
+  return CURRENCY_SYMBOLS[code] || `${code} `
+}
+
 export default function ItineraryView({ itinerary, sessionId, onReset }: ItineraryViewProps) {
-  const savings = Math.max(itinerary.total_budget_usd - itinerary.actual_calculated_cost_usd, 0)
+  const symbol = currencySymbol(itinerary.currency)
+  const savings = Math.max(itinerary.total_budget - itinerary.actual_calculated_cost, 0)
   const [showConfetti, setShowConfetti] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
 
@@ -105,8 +121,8 @@ export default function ItineraryView({ itinerary, sessionId, onReset }: Itinera
         <div className="mb-8 grid gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <BudgetMeter
-              budget={itinerary.total_budget_usd}
-              actual={itinerary.actual_calculated_cost_usd}
+              budget={itinerary.total_budget}
+              actual={itinerary.actual_calculated_cost}
               currency={itinerary.currency}
             />
           </div>
@@ -114,7 +130,7 @@ export default function ItineraryView({ itinerary, sessionId, onReset }: Itinera
             <p className="text-sm text-slate-400">Money saved vs budget</p>
             <AnimatedNumber
               value={savings}
-              prefix="$"
+              prefix={symbol}
               className="text-3xl font-bold text-emerald-400"
             />
             <p className="mt-1 text-xs text-slate-500">Estimated prices include taxes & fees</p>
@@ -164,7 +180,7 @@ export default function ItineraryView({ itinerary, sessionId, onReset }: Itinera
 
         <div className="mb-8 space-y-6">
           {itinerary.days.map((day, idx) => (
-            <DayCard key={day.day_number} day={day} index={idx} />
+            <DayCard key={day.day_number} day={day} index={idx} currency={itinerary.currency} />
           ))}
         </div>
 

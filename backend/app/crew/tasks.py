@@ -106,6 +106,7 @@ plan_travel_task = Task(
         "End date: {end_date}\n"
         "Travelers: {travelers}\n"
         "Travel style: {travel_style}\n"
+        "Total transit budget (USD): {budget_transit_usd}\n"
         "Route skeleton: {skeleton}\n"
         "Real search context: {search_context}\n\n"
         "Rules:\n"
@@ -113,12 +114,13 @@ plan_travel_task = Task(
         "2. Include an outbound leg from origin to the first base on day 1, and a return leg from the last base to origin on the final day.\n"
         "3. Use provider names and rough prices from the search context. Do not use MockAir.\n"
         "4. Plan daily local transport (cab, bus, metro, walk) between the accommodation and activity clusters.\n"
-        "5. Estimate costs and durations for every leg.\n"
+        "5. Keep the sum of all transit legs within the Total transit budget (USD).\n"
+        "6. Estimate costs and durations for every leg.\n"
         "Output ONLY a raw JSON array of transit legs with no markdown or explanations. Each leg must have:\n"
         '{{"day_number": N, "from_location": "...", "to_location": "...", "mode": "flight|train|bus|metro|cab|walk", '
         '"provider": "...", "estimated_cost_usd": N, "duration_minutes": N, "notes": "..."}}'
     ),
-    expected_output="A raw JSON array of transit legs using real search context.",
+    expected_output="A raw JSON array of transit legs using real search context, within budget.",
     agent=travel_planner_agent,
     context=[parse_input_task],
 )
@@ -127,18 +129,22 @@ plan_travel_task = Task(
 plan_stay_task = Task(
     description=(
         "Using the parsed request, route skeleton, and real hotel search context, plan accommodation.\n"
+        "Travelers: {travelers}\n"
+        "Travel style: {travel_style}\n"
+        "Total stay budget (USD): {budget_stay_usd}\n"
         "Route skeleton: {skeleton}\n"
         "Real search context: {search_context}\n\n"
         "Rules:\n"
         "1. Use the skeleton's base_location per night; do not put every night in one generic city-center hotel.\n"
         "2. Recommend real hotel names from the search context. Do not use MockHotel Plus.\n"
         "3. Match the travel_style (budget / balanced / luxury) and choose a convenient area/region.\n"
-        "4. Include hotel name, location/neighborhood, room type, nightly cost, and why it was chosen.\n"
+        "4. Keep the sum of all nightly stay costs within the Total stay budget (USD).\n"
+        "5. Include hotel name, location/neighborhood, room type, nightly cost, and why it was chosen.\n"
         "Output ONLY a raw JSON array of stay options with no markdown or explanations. Each option must have:\n"
         '{{"night_number": N, "hotel_name": "...", "location": "...", "room_type": "...", '
         '"estimated_cost_usd": N, "why_this_choice": "...", "booking_notes": "..."}}'
     ),
-    expected_output="A raw JSON array of stay options using real hotel names.",
+    expected_output="A raw JSON array of stay options using real hotel names, within budget.",
     agent=stay_planner_agent,
     context=[parse_input_task],
 )
@@ -146,20 +152,29 @@ plan_stay_task = Task(
 
 plan_sightseeing_task = Task(
     description=(
-        "Using the parsed request, route skeleton, and real attraction search context, plan sightseeing and dining for each day.\n"
+        "Using the parsed request, route skeleton, and real attraction search context, plan places to visit, food, and local roaming for each day.\n"
+        "Travelers: {travelers}\n"
+        "Dietary notes: {dietary_notes}\n"
+        "Total food/local-roaming budget (USD): {budget_food_usd}\n"
         "Route skeleton: {skeleton}\n"
         "Real search context: {search_context}\n\n"
+        "Business model (important):\n"
+        "- This is a travel package: travel, stay, meals, and local cabs are included.\n"
+        "- Activity ENTRANCE FEES and optional experiences are NOT included.\n"
+        "- Therefore, every activity's estimated_cost_usd must cover ONLY food or local cab transport to the spot.\n"
+        "- Use category 'food' for meals and 'transit' for local cab to the spot; use 'sightseeing' for places visited (cost 0).\n\n"
         "Rules:\n"
         "1. Use the skeleton's day theme, region, and activity_focus to choose real attractions from the search context.\n"
         "2. Cluster activities by the day's region to minimize transit.\n"
         "3. Assign realistic time slots and meal breaks.\n"
         "4. Respect dietary and mobility notes.\n"
-        "5. Do not invent generic attractions like 'Historic Downtown Walk'. Use real place names from the search context.\n"
+        "5. Keep the sum of all food/transit costs within the Total food/local-roaming budget (USD).\n"
+        "6. Do not invent generic attractions. Use real place names from the search context.\n"
         "Output ONLY a raw JSON array of day objects with no markdown or explanations. Each day object must have:\n"
         '{{"day_number": N, "theme": "...", "activities": [{{"time_slot": "...", "activity_name": "...", '
-        '"location": "...", "category": "sightseeing|food|shopping|rest", "estimated_cost_usd": N, "notes": "..."}}]}}'
+        '"location": "...", "category": "sightseeing|food|transit|rest", "estimated_cost_usd": N, "notes": "..."}}]}}'
     ),
-    expected_output="A raw JSON array of day objects with real attractions.",
+    expected_output="A raw JSON array of day objects with food and local-transit costs only; no entrance fees.",
     agent=sightseeing_planner_agent,
     context=[parse_input_task],
 )
@@ -178,12 +193,18 @@ assemble_itinerary_task = Task(
         "Total budget (USD): {total_budget_usd}\n"
         "Dietary notes: {dietary_notes}\n"
         "Mobility notes: {mobility_notes}\n\n"
+        "Original currency: {currency}\n"
+        "Total budget (USD): {total_budget_usd}\n"
         "Baseline itinerary (use this as your starting point): {baseline_itinerary}\n\n"
         "Route skeleton (JSON): {skeleton}\n\n"
         "Real search context (JSON): {search_context}\n\n"
         "Transit legs (JSON array): {transit_raw}\n\n"
         "Stay options (JSON array): {stay_raw}\n\n"
         "Sightseeing days (JSON array): {sightseeing_raw}\n\n"
+        "Business model (important):\n"
+        "- Travel, stay, meals, and local cabs are included.\n"
+        "- Activity entrance fees and optional experiences are NOT included.\n"
+        "- Activity costs should only cover food and local cab transport to the spot.\n\n"
         "Rules:\n"
         "1. Keep exactly the same number of days and dates as the baseline.\n"
         "2. Use the skeleton's region and theme for each day; do not change them unless the baseline is clearly wrong.\n"
@@ -194,8 +215,9 @@ assemble_itinerary_task = Task(
         "7. Ensure every day has at least 2–3 activities with realistic time slots.\n"
         "8. Keep arrival/return transit legs on day 1 and the last day.\n"
         "9. Preserve meals_included and compute daily costs correctly: daily_transit + daily_activity + daily_stay = total_daily.\n"
-        "10. Keep top-level inclusions, exclusions, and notes.\n"
-        "11. Return ONLY raw JSON with no markdown or explanations.\n\n"
+        "10. Keep the actual_calculated_cost_usd at or below total_budget_usd; if it exceeds, add an over-budget note.\n"
+        "11. Keep top-level inclusions, exclusions, and notes.\n"
+        "12. Return ONLY raw JSON with no markdown or explanations.\n\n"
         "Output shape (match the baseline exactly)."
     ),
     expected_output="A refined raw JSON object matching the MasterTravelItinerary schema.",

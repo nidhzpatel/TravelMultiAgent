@@ -1,11 +1,14 @@
 import asyncio
 import json
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from typing import Any
+
+import httpx
 
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -90,12 +93,34 @@ def _extract_json(raw: str) -> Any:
     return json.loads(match.group(0))
 
 
-_CURRENCY_RATES = {
-    "inr": 85.0,
-    "rupee": 85.0,
-    "rupees": 85.0,
-    "₹": 85.0,
-    "rs": 85.0,
+# Maps currency symbols/words to ISO currency codes.
+_CURRENCY_SYMBOL_TO_CODE: dict[str, str] = {
+    "inr": "INR",
+    "rupee": "INR",
+    "rupees": "INR",
+    "₹": "INR",
+    "rs": "INR",
+    "eur": "EUR",
+    "euro": "EUR",
+    "euros": "EUR",
+    "€": "EUR",
+    "gbp": "GBP",
+    "pound": "GBP",
+    "pounds": "GBP",
+    "£": "GBP",
+    "usd": "USD",
+    "dollar": "USD",
+    "dollars": "USD",
+    "$": "USD",
+}
+
+# Fallback rates (USD base) used when the live API is unreachable.
+_CURRENCY_RATES: dict[str, float] = {
+    "inr": 86.0,
+    "rupee": 86.0,
+    "rupees": 86.0,
+    "₹": 86.0,
+    "rs": 86.0,
     "eur": 0.92,
     "euro": 0.92,
     "euros": 0.92,
@@ -104,7 +129,97 @@ _CURRENCY_RATES = {
     "pound": 0.79,
     "pounds": 0.79,
     "£": 0.79,
+    "usd": 1.0,
+    "dollar": 1.0,
+    "dollars": 1.0,
+    "$": 1.0,
 }
+
+# Maps common countries/destinations to currency codes when user omits currency.
+_COUNTRY_CURRENCY_MAP: dict[str, str] = {
+    "india": "INR",
+    "usa": "USD",
+    "united states": "USD",
+    "america": "USD",
+    "uk": "GBP",
+    "united kingdom": "GBP",
+    "britain": "GBP",
+    "england": "GBP",
+    "germany": "EUR",
+    "france": "EUR",
+    "italy": "EUR",
+    "spain": "EUR",
+    "netherlands": "EUR",
+    "portugal": "EUR",
+    "belgium": "EUR",
+    "austria": "EUR",
+    "greece": "EUR",
+    "ireland": "EUR",
+    "uae": "AED",
+    "dubai": "AED",
+    "abu dhabi": "AED",
+    "japan": "JPY",
+    "tokyo": "JPY",
+    "australia": "AUD",
+    "canada": "CAD",
+    "thailand": "THB",
+    "bangkok": "THB",
+    "singapore": "SGD",
+    "malaysia": "MYR",
+    "kuala lumpur": "MYR",
+    "indonesia": "IDR",
+    "bali": "IDR",
+    "vietnam": "VND",
+    "nepal": "NPR",
+    "sri lanka": "LKR",
+    "turkey": "TRY",
+    "switzerland": "CHF",
+}
+
+# Live exchange-rate cache.
+_exchange_rate_cache: dict[str, Any] = {"rates": {}, "fetched_at": 0.0}
+_EXCHANGE_RATE_TTL_SECONDS = 3600
+
+
+def _fetch_exchange_rates() -> dict[str, float]:
+    """Fetch USD-based exchange rates from a free API, with in-memory caching."""
+    now = time.time()
+    if now - _exchange_rate_cache["fetched_at"] < _EXCHANGE_RATE_TTL_SECONDS and _exchange_rate_cache["rates"]:
+        return _exchange_rate_cache["rates"]
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get("https://open.er-api.com/v6/latest/USD")
+            response.raise_for_status()
+            data = response.json()
+            rates = data.get("rates", {})
+            if rates:
+                _exchange_rate_cache["rates"] = rates
+                _exchange_rate_cache["fetched_at"] = now
+                return rates
+    except Exception:
+        pass
+
+    # Fallback to hardcoded rates if API fails.
+    return {
+        "INR": 86.0,
+        "EUR": 0.92,
+        "GBP": 0.79,
+        "USD": 1.0,
+        "AED": 3.67,
+        "JPY": 145.0,
+        "AUD": 1.5,
+        "CAD": 1.36,
+        "THB": 34.0,
+        "SGD": 1.34,
+        "MYR": 4.4,
+        "IDR": 15500.0,
+        "VND": 24500.0,
+        "NPR": 138.0,
+        "LKR": 300.0,
+        "TRY": 34.0,
+        "CHF": 0.88,
+    }
 
 
 _BUDGET_RE = re.compile(
@@ -284,52 +399,71 @@ def _parse_relative_date_range(text: str) -> tuple[str, str] | None:
     return None
 
 
-def _normalize_budget(value: Any, prompt: str) -> float | None:
-    """Convert a budget value to USD, detecting currency from the prompt.
+def _detect_currency_from_prompt(prompt: str) -> str | None:
+    """Return a currency code if an explicit currency symbol/code is found in the prompt."""
+    prompt_lower = prompt.lower()
+    for symbol in sorted(_CURRENCY_SYMBOL_TO_CODE.keys(), key=len, reverse=True):
+        if symbol in prompt_lower:
+            return _CURRENCY_SYMBOL_TO_CODE[symbol]
+    return None
 
+
+def _infer_currency_from_locations(origin: str, destination: str) -> str | None:
+    """Infer currency from origin/destination when user does not mention one."""
+    combined = f"{origin} {destination}".lower()
+    for place, code in _COUNTRY_CURRENCY_MAP.items():
+        if place in combined:
+            return code
+    return None
+
+
+def _normalize_budget(value: Any, prompt: str, origin: str, destination: str) -> tuple[float, str, float] | None:
+    """Convert a budget value to USD while preserving the original currency.
+
+    Returns (usd_amount, currency_code, exchange_rate) or None on failure.
     Handles formats like 4000, $4,000, 4k, 4 thousand, ₹2,00,000, 200000 INR.
-    When a non-USD currency is mentioned, we parse the amount directly from the
-    prompt to avoid double-converting an already-converted LLM value.
     """
     prompt_lower = prompt.lower()
 
-    # Find the currency mentioned in the prompt.
-    mentioned_currency: str | None = None
-    for symbol in sorted(_CURRENCY_RATES.keys(), key=len, reverse=True):
-        if symbol in prompt_lower:
-            mentioned_currency = symbol
-            break
+    # 1. Try explicit currency from prompt.
+    currency_code = _detect_currency_from_prompt(prompt)
 
-    is_non_usd = mentioned_currency and mentioned_currency not in ("$",)
+    # 2. Infer from origin/destination if not explicit.
+    if currency_code is None:
+        currency_code = _infer_currency_from_locations(origin, destination)
 
-    # If the LLM already returned a small numeric value for a large foreign amount,
-    # it likely converted it; trust it.
-    if is_non_usd:
+    # 3. Default to USD.
+    if currency_code is None:
+        currency_code = "USD"
+
+    rates = _fetch_exchange_rates()
+    exchange_rate = rates.get(currency_code.upper())
+    if exchange_rate is None:
+        exchange_rate = _CURRENCY_RATES.get(currency_code.lower(), 1.0)
+
+    # Parse the raw amount from the prompt if possible.
+    match = _BUDGET_RE.search(prompt)
+    if match:
+        raw_amount_str = (
+            match.group(1) or match.group(3) or match.group(5) or ""
+        ).replace(",", "")
+        multiplier_word = (
+            match.group(2) or match.group(4) or match.group(6) or ""
+        ).lower()
         try:
-            llm_value = float(value)
-            match = _BUDGET_RE.search(prompt)
-            if match:
-                raw_amount_str = (
-                    match.group(1) or match.group(3) or match.group(5) or ""
-                ).replace(",", "")
-                multiplier_word = (
-                    match.group(2) or match.group(4) or match.group(6) or ""
-                ).lower()
-                raw_amount = float(raw_amount_str)
-                multiplier = _NUMBER_WORDS.get(multiplier_word, 1)
-                original_amount = raw_amount * multiplier
-                # If LLM value is within 5% of our conversion, trust the LLM.
-                expected_usd = original_amount / _CURRENCY_RATES[mentioned_currency]
-                if abs(llm_value - expected_usd) / max(expected_usd, 1) < 0.05:
-                    return round(llm_value, 2)
-                # Otherwise use our own calculation from the prompt.
-                return round(expected_usd, 2)
+            raw_amount = float(raw_amount_str)
+            multiplier = _NUMBER_WORDS.get(multiplier_word, 1)
+            original_amount = raw_amount * multiplier
+            usd_amount = original_amount / exchange_rate
+            return round(usd_amount, 2), currency_code.upper(), exchange_rate
         except (TypeError, ValueError):
             pass
 
-    # No foreign currency detected; accept the LLM value if it's numeric.
+    # Fallback: trust the numeric value and treat it as the original currency.
     try:
-        return float(value)
+        original_amount = float(value)
+        usd_amount = original_amount / exchange_rate
+        return round(usd_amount, 2), currency_code.upper(), exchange_rate
     except (TypeError, ValueError):
         return None
 
@@ -428,17 +562,116 @@ def _normalize_dietary(note: str) -> str:
     return note_lower
 
 
+_ORIGIN_DEST_STOPWORDS = {
+    "a", "an", "the", "my", "me", "i", "we", "us", "home", "here", "there",
+    "today", "tomorrow", "yesterday", "next", "this", "coming", "week", "month",
+    "budget", "plan", "trip", "travel", "for", "with", "and", "or", "of", "in",
+    "on", "at", "from", "to", "between", "starting", "ending", "returning",
+}
+
+
+def _extract_origin_destination(prompt: str) -> tuple[str | None, str | None]:
+    """Rule-based fallback for origin/destination when the LLM parser misses them."""
+    p = prompt.lower()
+    origin: str | None = None
+    destination: str | None = None
+
+    # from <origin> to <destination>
+    m = re.search(
+        r"from\s+([a-z][a-z\s,]{1,40}?)\s+to\s+([a-z][a-z\s,]{1,40}?)"
+        r"(?=\s+(?:for|between|budget|with|and|on|in|starting|ending|from|to|returning|today|tomorrow|next|this)\b|$)",
+        p,
+    )
+    if m:
+        origin = m.group(1).strip().title()
+        destination = m.group(2).strip().title()
+        return origin, destination
+
+    # to <destination> from <origin>
+    m = re.search(
+        r"to\s+([a-z][a-z\s,]{1,40}?)\s+from\s+([a-z][a-z\s,]{1,40}?)"
+        r"(?=\s+(?:for|between|budget|with|and|on|in|starting|ending|returning|today|tomorrow|next|this)\b|$)",
+        p,
+    )
+    if m:
+        destination = m.group(1).strip().title()
+        origin = m.group(2).strip().title()
+        return origin, destination
+
+    # travel/going/want to go to <destination>
+    m = re.search(
+        r"(?:travel|traveling|travelling|going|go|wants?\s+to\s+(?:go|travel|travelling))\s+(?:to\s+)?([a-z][a-z\s,]{1,40}?)"
+        r"(?=\s+(?:from|for|between|budget|with|and|on|in|starting|ending|returning|today|tomorrow|next|this)\b|$)",
+        p,
+    )
+    if m:
+        destination = m.group(1).strip().title()
+
+    # standalone from <origin>
+    m = re.search(
+        r"from\s+([a-z][a-z\s,]{1,40}?)"
+        r"(?=\s+(?:to|for|between|budget|with|and|on|in|starting|ending|returning|today|tomorrow|next|this)\b|$)",
+        p,
+    )
+    if m:
+        origin = m.group(1).strip().title()
+
+    # standalone to <destination> if destination still missing
+    if not destination:
+        m = re.search(
+            r"\bto\s+([a-z][a-z\s,]{1,40}?)"
+            r"(?=\s+(?:from|for|between|budget|with|and|on|in|starting|ending|returning|today|tomorrow|next|this)\b|$)",
+            p,
+        )
+        if m:
+            destination = m.group(1).strip().title()
+
+    # Drop obvious stopwords / single-letter garbage.
+    if origin and origin.lower() in _ORIGIN_DEST_STOPWORDS:
+        origin = None
+    if destination and destination.lower() in _ORIGIN_DEST_STOPWORDS:
+        destination = None
+
+    return origin, destination
+
+
+def _extract_interests_from_prompt(prompt: str) -> list[str]:
+    """Rule-based fallback for interests when the LLM parser misses them."""
+    found: list[str] = []
+    p = prompt.lower()
+    for canonical, synonyms in _INTEREST_SYNONYMS.items():
+        checks = [canonical, *synonyms]
+        if any(check in p for check in checks):
+            found.append(canonical)
+    return found
+
+
 def _build_inputs(request: TravelPlanRequest, *, nearby_places: list[str] | None = None) -> dict[str, Any]:
     """Convert a TravelPlanRequest into the string/interpolation inputs used by crews."""
     delta = (request.end_date - request.start_date).days
     number_of_days = max(1, delta + 1)
+
+    # Budget distribution for the package model:
+    # - transit: 30% (40% if flights are likely needed)
+    # - stay: 45% (35% if flights needed)
+    # - food/meals: 20%
+    # - contingency: 10%
+    flights_needed = bool(request.origin.strip()) and request.origin.strip().lower() != request.destination.strip().lower()
+    transit_share = 0.40 if flights_needed else 0.30
+    stay_share = 0.35 if flights_needed else 0.45
+    food_share = 0.20
+
     return {
         "destination": request.destination,
         "origin": request.origin,
         "start_date": _format_date(request.start_date),
         "end_date": _format_date(request.end_date),
         "travelers": request.travelers,
+        "currency": request.currency,
         "total_budget_usd": request.total_budget_usd,
+        "budget_transit_usd": round(request.total_budget_usd * transit_share, 2),
+        "budget_stay_usd": round(request.total_budget_usd * stay_share, 2),
+        "budget_food_usd": round(request.total_budget_usd * food_share, 2),
         "interests": ", ".join(request.interests) if request.interests else "general sightseeing",
         "travel_style": request.travel_style,
         "cover_nearby": "yes" if request.cover_nearby else "no",
@@ -463,6 +696,7 @@ def _build_parsed_raw(request: TravelPlanRequest) -> str:
         "end_date": _format_date(request.end_date),
         "travelers": request.travelers,
         "total_budget_usd": request.total_budget_usd,
+        "currency": getattr(request, "currency", "USD"),
         "interests": request.interests,
         "travel_style": request.travel_style,
         "cover_nearby": request.cover_nearby,
@@ -473,7 +707,7 @@ def _build_parsed_raw(request: TravelPlanRequest) -> str:
     return json.dumps(parsed)
 
 
-def _default_activities(day_number: int, destination: str) -> list[ActivityItem]:
+def _default_activities(day_number: int, destination: str, exchange_rate: float = 1.0) -> list[ActivityItem]:
     """Return a varied set of default activities for any day number."""
     activity_pool = [
         ActivityItem(
@@ -482,6 +716,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} Old Town",
             category="sightseeing",
             estimated_cost_usd=0.0,
+            estimated_cost=_to_original(0.0, exchange_rate),
             notes="Explore the historic heart of the city on foot.",
         ),
         ActivityItem(
@@ -490,6 +725,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} Main Market",
             category="food",
             estimated_cost_usd=12.0,
+            estimated_cost=_to_original(12.0, exchange_rate),
             notes="Try local street food and regional specialties.",
         ),
         ActivityItem(
@@ -498,6 +734,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} Museum District",
             category="sightseeing",
             estimated_cost_usd=15.0,
+            estimated_cost=_to_original(15.0, exchange_rate),
             notes="Visit the main museum and galleries.",
         ),
         ActivityItem(
@@ -506,6 +743,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} Skyline Deck",
             category="sightseeing",
             estimated_cost_usd=10.0,
+            estimated_cost=_to_original(10.0, exchange_rate),
             notes="Enjoy skyline and sunset views.",
         ),
         ActivityItem(
@@ -514,6 +752,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} City Center",
             category="sightseeing",
             estimated_cost_usd=8.0,
+            estimated_cost=_to_original(8.0, exchange_rate),
             notes="See an iconic temple, monument, or landmark.",
         ),
         ActivityItem(
@@ -522,6 +761,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} Entertainment District",
             category="food",
             estimated_cost_usd=20.0,
+            estimated_cost=_to_original(20.0, exchange_rate),
             notes="Dinner and a relaxed evening walk through the lively district.",
         ),
         ActivityItem(
@@ -530,6 +770,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} Arts Quarter",
             category="sightseeing",
             estimated_cost_usd=5.0,
+            estimated_cost=_to_original(5.0, exchange_rate),
             notes="Wander through galleries, street art, and local cafés.",
         ),
         ActivityItem(
@@ -538,6 +779,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} Central Park",
             category="sightseeing",
             estimated_cost_usd=3.0,
+            estimated_cost=_to_original(3.0, exchange_rate),
             notes="Relax in a green space and people-watch.",
         ),
         ActivityItem(
@@ -546,6 +788,7 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
             location=f"{destination} Shopping District",
             category="shopping",
             estimated_cost_usd=15.0,
+            estimated_cost=_to_original(15.0, exchange_rate),
             notes="Browse local shops and pick up souvenirs.",
         ),
     ]
@@ -564,10 +807,16 @@ def _default_activities(day_number: int, destination: str) -> list[ActivityItem]
                 location=item.location,
                 category=item.category,
                 estimated_cost_usd=item.estimated_cost_usd,
+                estimated_cost=item.estimated_cost,
                 notes=item.notes,
             )
         )
     return selected
+
+
+def _to_original(usd_amount: float, exchange_rate: float) -> float:
+    """Convert an internal USD amount to the user's original currency."""
+    return round(usd_amount * exchange_rate, 2)
 
 
 def _build_itinerary(
@@ -580,6 +829,10 @@ def _build_itinerary(
     search_context: dict[str, str],
 ) -> MasterTravelItinerary:
     """Assemble the final itinerary from the skeleton, search context, and agent outputs."""
+    exchange_rate = getattr(request, "exchange_rate", 1.0) or 1.0
+    currency = getattr(request, "currency", "USD") or "USD"
+    total_budget = getattr(request, "total_budget", request.total_budget_usd) or request.total_budget_usd
+
     try:
         parsed = _extract_json(parsed_raw)
     except Exception:
@@ -611,6 +864,7 @@ def _build_itinerary(
                         location=current.location,
                         room_type=current.room_type,
                         estimated_cost_usd=current.estimated_cost_usd,
+                        estimated_cost=_to_original(current.estimated_cost_usd, exchange_rate),
                         why_this_choice=current.why_this_choice,
                         booking_notes=current.booking_notes,
                     )
@@ -641,6 +895,7 @@ def _build_itinerary(
                     mode="flight",
                     provider="Real flight search (see context)" if search_context.get("outbound_flight") else "MockAir",
                     estimated_cost_usd=260.0 * request.travelers,
+                    estimated_cost=_to_original(260.0 * request.travelers, exchange_rate),
                     duration_minutes=210,
                     notes=search_context.get("outbound_flight", "Estimated outbound flight cost.")[:300],
                 ),
@@ -651,6 +906,7 @@ def _build_itinerary(
                     mode="flight",
                     provider="Real flight search (see context)" if search_context.get("return_flight") else "MockAir",
                     estimated_cost_usd=260.0 * request.travelers,
+                    estimated_cost=_to_original(260.0 * request.travelers, exchange_rate),
                     duration_minutes=210,
                     notes=search_context.get("return_flight", "Estimated return flight cost.")[:300],
                 ),
@@ -663,6 +919,7 @@ def _build_itinerary(
                 mode="metro",
                 provider="Local Transit",
                 estimated_cost_usd=5.0 * request.travelers,
+                estimated_cost=_to_original(5.0 * request.travelers, exchange_rate),
                 duration_minutes=30,
                 notes="Daily local transit estimate.",
             )
@@ -675,13 +932,15 @@ def _build_itinerary(
             skeleton_day = draft_days.get(night)
             base = skeleton_day.base_location if skeleton_day else request.destination
             region = skeleton_day.region if skeleton_day else base
+            stay_cost_usd = nightly * request.travelers
             stays.append(
                 StayOption(
                     night_number=night,
                     hotel_name=f"Hotel in {region}",
                     location=f"{base} — {region}",
                     room_type=f"{request.travel_style} room",
-                    estimated_cost_usd=nightly * request.travelers,
+                    estimated_cost_usd=stay_cost_usd,
+                    estimated_cost=_to_original(stay_cost_usd, exchange_rate),
                     why_this_choice="Base location chosen by the route planner to minimize backtracking.",
                     booking_notes="Use the live hotel search results in the plan context for real names and booking links.",
                 )
@@ -710,13 +969,14 @@ def _build_itinerary(
                                 location=a.get("location", skeleton_day.region if skeleton_day else request.destination),
                                 category=a.get("category", "sightseeing"),
                                 estimated_cost_usd=float(a.get("estimated_cost_usd", 0) or 0),
+                                estimated_cost=_to_original(float(a.get("estimated_cost_usd", 0) or 0), exchange_rate),
                                 notes=a.get("notes", ""),
                             )
                         )
                 break
 
         if not activities:
-            activities = _default_activities(day_number, skeleton_day.region if skeleton_day else request.destination)
+            activities = _default_activities(day_number, skeleton_day.region if skeleton_day else request.destination, exchange_rate)
 
         day_transit = [leg for leg in transit_legs if leg.day_number == day_number]
         day_transit_cost = sum(leg.estimated_cost_usd for leg in day_transit)
@@ -743,9 +1003,13 @@ def _build_itinerary(
                 transit_legs=day_transit,
                 stay=stay,
                 daily_transit_cost_usd=day_transit_cost,
+                daily_transit_cost=_to_original(day_transit_cost, exchange_rate),
                 daily_activity_cost_usd=day_activity_cost,
+                daily_activity_cost=_to_original(day_activity_cost, exchange_rate),
                 daily_stay_cost_usd=day_stay_cost,
+                daily_stay_cost=_to_original(day_stay_cost, exchange_rate),
                 total_daily_cost_usd=day_transit_cost + day_activity_cost + day_stay_cost,
+                total_daily_cost=_to_original(day_transit_cost + day_activity_cost + day_stay_cost, exchange_rate),
             )
         )
 
@@ -768,7 +1032,7 @@ def _build_itinerary(
 
     exclusions = [
         "Personal expenses, tips, and travel insurance",
-        "Entry fees unless explicitly included in an activity",
+        "Activity entrance fees, attraction tickets, and optional experiences",
         "Visa costs and international roaming",
     ]
     if request.dietary_notes:
@@ -782,12 +1046,23 @@ def _build_itinerary(
     elif request.cover_nearby:
         trip_scope += " + nearby attractions"
 
-    return MasterTravelItinerary(
+    notes = [
+        "Prices include estimated taxes and fees where available.",
+        "A 10% contingency buffer has been added to the total.",
+        "Live provider names and links are sourced from Serper search results.",
+    ]
+    if currency != "USD":
+        notes.append(f"Budget and costs are displayed in {currency} using an exchange rate of {exchange_rate:,.2f} per 1 USD.")
+
+    itinerary = MasterTravelItinerary(
         destination=request.destination,
         origin=origin,
+        total_budget=round(total_budget, 2),
         total_budget_usd=request.total_budget_usd,
+        actual_calculated_cost=_to_original(actual_cost, exchange_rate),
         actual_calculated_cost_usd=round(actual_cost, 2),
-        currency="USD",
+        currency=currency,
+        exchange_rate=exchange_rate,
         travelers=travelers,
         days=days,
         transit_summary=f"Planned {len(transit_legs)} transit legs across {len({leg.from_location for leg in transit_legs})} locations.",
@@ -796,12 +1071,139 @@ def _build_itinerary(
         trip_scope=trip_scope,
         inclusions=inclusions,
         exclusions=exclusions,
-        notes=[
-            "Prices include estimated taxes and fees where available.",
-            "A 10% contingency buffer has been added to the total.",
-            "Live provider names and links are sourced from Serper search results.",
-        ],
+        notes=notes,
     )
+
+    scaled_data = _scale_itinerary_to_budget(itinerary.model_dump(), request.total_budget_usd, exchange_rate)
+    return MasterTravelItinerary(**scaled_data)
+
+
+def _fill_display_currency(data: dict, exchange_rate: float) -> dict:
+    """Ensure every *_usd cost field has a matching display-currency field."""
+    if not isinstance(data, dict):
+        return data
+
+    def ensure(pair_usd: str, pair: str, obj: dict) -> None:
+        if pair_usd in obj and pair not in obj:
+            obj[pair] = _to_original(float(obj[pair_usd] or 0), exchange_rate)
+
+    ensure("total_budget_usd", "total_budget", data)
+    ensure("actual_calculated_cost_usd", "actual_calculated_cost", data)
+
+    for day in data.get("days", []):
+        if not isinstance(day, dict):
+            continue
+        ensure("daily_transit_cost_usd", "daily_transit_cost", day)
+        ensure("daily_activity_cost_usd", "daily_activity_cost", day)
+        ensure("daily_stay_cost_usd", "daily_stay_cost", day)
+        ensure("total_daily_cost_usd", "total_daily_cost", day)
+        for leg in day.get("transit_legs", []):
+            ensure("estimated_cost_usd", "estimated_cost", leg)
+        stay = day.get("stay")
+        if stay:
+            ensure("estimated_cost_usd", "estimated_cost", stay)
+        for activity in day.get("activities", []):
+            ensure("estimated_cost_usd", "estimated_cost", activity)
+
+    return data
+
+
+def _recompute_display_costs(data: dict, exchange_rate: float) -> dict:
+    """Recompute all display-currency cost fields from their USD counterparts."""
+    if not isinstance(data, dict):
+        return data
+
+    def recalc(pair_usd: str, pair: str, obj: dict) -> None:
+        if pair_usd in obj:
+            obj[pair] = _to_original(float(obj[pair_usd] or 0), exchange_rate)
+
+    recalc("total_budget_usd", "total_budget", data)
+    recalc("actual_calculated_cost_usd", "actual_calculated_cost", data)
+
+    for day in data.get("days", []):
+        if not isinstance(day, dict):
+            continue
+        recalc("daily_transit_cost_usd", "daily_transit_cost", day)
+        recalc("daily_activity_cost_usd", "daily_activity_cost", day)
+        recalc("daily_stay_cost_usd", "daily_stay_cost", day)
+        recalc("total_daily_cost_usd", "total_daily_cost", day)
+        for leg in day.get("transit_legs", []):
+            recalc("estimated_cost_usd", "estimated_cost", leg)
+        stay = day.get("stay")
+        if stay:
+            recalc("estimated_cost_usd", "estimated_cost", stay)
+        for activity in day.get("activities", []):
+            recalc("estimated_cost_usd", "estimated_cost", activity)
+
+    return data
+
+
+def _scale_itinerary_to_budget(data: dict, total_budget_usd: float, exchange_rate: float) -> dict:
+    """Proportionally scale all itemized costs down when the plan exceeds the budget.
+
+    This is a deterministic safety net: agents receive budget caps, but LLMs can
+    still overshoot. Scaling keeps the itinerary structure identical while making
+    the final total fit the user's original currency budget.
+    """
+    if not isinstance(data, dict) or total_budget_usd <= 0:
+        return data
+
+    actual_usd = float(data.get("actual_calculated_cost_usd") or 0)
+    if actual_usd <= total_budget_usd:
+        return data
+
+    factor = total_budget_usd / actual_usd
+    currency = data.get("currency", "USD")
+
+    for day in data.get("days", []):
+        if not isinstance(day, dict):
+            continue
+        for leg in day.get("transit_legs", []):
+            leg["estimated_cost_usd"] = round(float(leg.get("estimated_cost_usd", 0) or 0) * factor, 2)
+        stay = day.get("stay")
+        if stay:
+            stay["estimated_cost_usd"] = round(float(stay.get("estimated_cost_usd", 0) or 0) * factor, 2)
+        for activity in day.get("activities", []):
+            activity["estimated_cost_usd"] = round(float(activity.get("estimated_cost_usd", 0) or 0) * factor, 2)
+
+        day["daily_transit_cost_usd"] = round(sum(
+            float(leg.get("estimated_cost_usd", 0) or 0) for leg in day.get("transit_legs", [])
+        ), 2)
+        day["daily_activity_cost_usd"] = round(sum(
+            float(activity.get("estimated_cost_usd", 0) or 0) for activity in day.get("activities", [])
+        ), 2)
+        day["daily_stay_cost_usd"] = round(float(day.get("stay", {}).get("estimated_cost_usd", 0) or 0), 2)
+        day["total_daily_cost_usd"] = round(
+            day["daily_transit_cost_usd"] + day["daily_activity_cost_usd"] + day["daily_stay_cost_usd"], 2
+        )
+
+    total_transit = sum(
+        sum(float(leg.get("estimated_cost_usd", 0) or 0) for leg in day.get("transit_legs", []))
+        for day in data.get("days", [])
+    )
+    total_activity = sum(
+        sum(float(activity.get("estimated_cost_usd", 0) or 0) for activity in day.get("activities", []))
+        for day in data.get("days", [])
+    )
+    total_stay = sum(
+        float(day.get("stay", {}).get("estimated_cost_usd", 0) or 0)
+        for day in data.get("days", [])
+    )
+    subtotal = total_transit + total_activity + total_stay
+    contingency = subtotal * 0.10
+    data["actual_calculated_cost_usd"] = round(subtotal + contingency, 2)
+
+    notes = data.get("notes") or []
+    if not isinstance(notes, list):
+        notes = [notes]
+    over_by_original = _to_original(actual_usd - total_budget_usd, exchange_rate)
+    notes.append(
+        f"Costs were scaled by {factor:.0%} to fit your {currency} budget "
+        f"(original estimate was {over_by_original:,.2f} over budget)."
+    )
+    data["notes"] = notes
+
+    return _recompute_display_costs(data, exchange_rate)
 
 
 def _is_valid_assembler_output(data: dict, request: TravelPlanRequest) -> bool:
@@ -812,7 +1214,8 @@ def _is_valid_assembler_output(data: dict, request: TravelPlanRequest) -> bool:
     days = data.get("days")
     if not isinstance(days, list) or len(days) != expected_days:
         return False
-    if data.get("actual_calculated_cost_usd") in (None, 0, 0.0):
+    actual_usd = data.get("actual_calculated_cost_usd")
+    if actual_usd in (None, 0, 0.0):
         return False
     return True
 
@@ -855,11 +1258,32 @@ async def _assemble_itinerary_with_crew(
         raw_output = str(result.tasks_output[0]) if result and hasattr(result, "tasks_output") and result.tasks_output else "{}"
         data = _extract_json(raw_output)
         if _is_valid_assembler_output(data, request):
+            exchange_rate = getattr(request, "exchange_rate", 1.0) or 1.0
+            data.setdefault("currency", request.currency)
+            data.setdefault("exchange_rate", exchange_rate)
+            data = _fill_display_currency(data, exchange_rate)
+            data = _scale_itinerary_to_budget(data, request.total_budget_usd, exchange_rate)
             return MasterTravelItinerary(**data)
     except Exception:
         pass
 
     return baseline
+
+
+_CURRENCY_SYMBOLS = {
+    "USD": "$",
+    "INR": "Rs ",
+    "EUR": "EUR ",
+    "GBP": "GBP ",
+    "AED": "AED ",
+    "JPY": "JPY ",
+    "AUD": "A$",
+    "CAD": "C$",
+}
+
+
+def _currency_symbol(currency_code: str) -> str:
+    return _CURRENCY_SYMBOLS.get(currency_code, f"{currency_code} ")
 
 
 def _pdf_text(text: str | None) -> str:
@@ -888,13 +1312,14 @@ def _generate_itinerary_pdf(itinerary: MasterTravelItinerary) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
+    symbol = _currency_symbol(itinerary.currency)
     pdf.set_font("Helvetica", "B", 20)
     pdf.cell(0, 12, _pdf_text(f"{itinerary.destination} Itinerary"), ln=True)
 
     pdf.set_font("Helvetica", "", 12)
     pdf.cell(0, 8, _pdf_text(f"From {itinerary.origin or 'N/A'}  |  {itinerary.travelers} traveler(s)"), ln=True)
-    pdf.cell(0, 8, _pdf_text(f"{len(itinerary.days)} day(s)  |  Budget: ${itinerary.total_budget_usd:,.2f} {itinerary.currency}"), ln=True)
-    pdf.cell(0, 8, _pdf_text(f"Estimated cost: ${itinerary.actual_calculated_cost_usd:,.2f} {itinerary.currency}"), ln=True)
+    pdf.cell(0, 8, _pdf_text(f"{len(itinerary.days)} day(s)  |  Budget: {symbol}{itinerary.total_budget:,.2f} {itinerary.currency}"), ln=True)
+    pdf.cell(0, 8, _pdf_text(f"Estimated cost: {symbol}{itinerary.actual_calculated_cost:,.2f} {itinerary.currency}"), ln=True)
     if itinerary.trip_scope:
         pdf.cell(0, 8, _pdf_text(f"Scope: {itinerary.trip_scope}"), ln=True)
     pdf.ln(5)
@@ -930,24 +1355,24 @@ def _generate_itinerary_pdf(itinerary: MasterTravelItinerary) -> bytes:
             pdf.cell(0, 6, "Stay:", ln=True)
             pdf.set_font("Helvetica", "", 10)
             pdf.cell(0, 6, _pdf_text(f"  {day.stay.hotel_name} - {day.stay.location}"), ln=True)
-            pdf.cell(0, 6, _pdf_text(f"  Room: {day.stay.room_type}  |  ${day.stay.estimated_cost_usd:,.2f}"), ln=True)
+            pdf.cell(0, 6, _pdf_text(f"  Room: {day.stay.room_type}  |  {symbol}{day.stay.estimated_cost:,.2f}"), ln=True)
 
         if day.transit_legs:
             pdf.set_font("Helvetica", "B", 10)
             pdf.cell(0, 6, "Transit:", ln=True)
             pdf.set_font("Helvetica", "", 10)
             for leg in day.transit_legs:
-                pdf.cell(0, 6, _pdf_text(f"  {leg.from_location} -> {leg.to_location} ({leg.mode})  |  ${leg.estimated_cost_usd:,.2f}"), ln=True)
+                pdf.cell(0, 6, _pdf_text(f"  {leg.from_location} -> {leg.to_location} ({leg.mode})  |  {symbol}{leg.estimated_cost:,.2f}"), ln=True)
 
         if day.activities:
             pdf.set_font("Helvetica", "B", 10)
             pdf.cell(0, 6, "Activities:", ln=True)
             pdf.set_font("Helvetica", "", 10)
             for activity in day.activities:
-                pdf.cell(0, 6, _pdf_text(f"  {activity.time_slot}: {activity.activity_name} ({activity.location}) - ${activity.estimated_cost_usd:,.2f}"), ln=True)
+                pdf.cell(0, 6, _pdf_text(f"  {activity.time_slot}: {activity.activity_name} ({activity.location}) - {symbol}{activity.estimated_cost:,.2f}"), ln=True)
 
         pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 6, _pdf_text(f"Daily total: ${day.total_daily_cost_usd:,.2f}"), ln=True)
+        pdf.cell(0, 6, _pdf_text(f"Daily total: {symbol}{day.total_daily_cost:,.2f}"), ln=True)
         pdf.ln(5)
 
     if itinerary.notes:
@@ -999,7 +1424,7 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
         "total_budget_usd",
         "interests",
     ]
-    optional_fields = ["travel_style", "cover_nearby", "dietary_notes", "mobility_notes", "free_text"]
+    optional_fields = ["travel_style", "cover_nearby", "dietary_notes", "mobility_notes", "free_text", "currency", "total_budget", "exchange_rate"]
 
     inputs = {
         "destination": "",
@@ -1114,16 +1539,6 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
             if "end_date" in missing:
                 missing.remove("end_date")
 
-    # Convert budget to USD if a non-USD currency was mentioned in the prompt.
-    if "total_budget_usd" in extracted:
-        normalized = _normalize_budget(extracted["total_budget_usd"], payload.prompt)
-        if normalized is not None and isinstance(normalized, (int, float)):
-            extracted["total_budget_usd"] = normalized
-        else:
-            del extracted["total_budget_usd"]
-            if "total_budget_usd" not in missing:
-                missing.append("total_budget_usd")
-
     # Default travel style to balanced so users don't get asked when they only mention a budget.
     if "travel_style" not in extracted:
         extracted["travel_style"] = "balanced"
@@ -1140,6 +1555,43 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
     }
     if origin_value in placeholder_origins or origin_value == destination_value:
         extracted.pop("origin", None)
+        origin_value = ""
+
+    # Fallback: use rule-based extraction for origin/destination when the LLM missed them.
+    if not extracted.get("origin") or not extracted.get("destination"):
+        fallback_origin, fallback_destination = _extract_origin_destination(payload.prompt)
+        if fallback_origin and not extracted.get("origin"):
+            extracted["origin"] = fallback_origin
+            origin_value = fallback_origin.lower().strip()
+        if fallback_destination and not extracted.get("destination"):
+            extracted["destination"] = fallback_destination
+            destination_value = fallback_destination.lower().strip()
+
+    # Fallback: extract interests from the raw prompt if the LLM missed them.
+    if "interests" not in extracted or not extracted["interests"]:
+        fallback_interests = _extract_interests_from_prompt(payload.prompt)
+        if fallback_interests:
+            extracted["interests"] = fallback_interests
+
+    # Convert budget to USD while preserving the original currency.
+    if "total_budget_usd" in extracted:
+        raw_budget_value = extracted["total_budget_usd"]
+        normalized = _normalize_budget(
+            raw_budget_value,
+            payload.prompt,
+            origin_value,
+            destination_value,
+        )
+        if normalized is not None:
+            usd_amount, currency_code, exchange_rate = normalized
+            extracted["total_budget"] = round(float(raw_budget_value), 2) if isinstance(raw_budget_value, (int, float)) else round(usd_amount * exchange_rate, 2)
+            extracted["total_budget_usd"] = usd_amount
+            extracted["currency"] = currency_code
+            extracted["exchange_rate"] = exchange_rate
+        else:
+            del extracted["total_budget_usd"]
+            if "total_budget_usd" not in missing:
+                missing.append("total_budget_usd")
 
     # Decide whether to cover nearby places, and build the list if relevant.
     raw_cover = extracted.get("cover_nearby")
@@ -1176,17 +1628,42 @@ async def _build_draft_itinerary(request: TravelPlanRequest, inputs: dict[str, A
     except Exception:
         data = {}
 
+    raw_days = [item for item in data.get("days", []) if isinstance(item, dict)]
+
+    # Correct architect mistakes: the first night's base should not be the origin,
+    # and the origin should not appear as a hotel region.
+    origin_lower = request.origin.strip().lower()
+    destination_lower = request.destination.strip().lower()
+    for item in raw_days:
+        base = (item.get("base_location") or "").strip().lower()
+        if base == origin_lower and base != destination_lower:
+            item["base_location"] = request.destination
+
     days: list[DraftItineraryDay] = []
-    for item in data.get("days", []):
-        if isinstance(item, dict):
+    for item in raw_days:
+        try:
             days.append(DraftItineraryDay(**item))
+        except Exception:
+            continue
 
     transit_legs: list[TransitLeg] = []
     for leg in data.get("transit_legs", []):
         if isinstance(leg, dict):
-            transit_legs.append(TransitLeg(**leg))
+            # The architect prompt asks for estimated_cost_usd only; fill the
+            # matching display field so Pydantic validation passes.
+            if "estimated_cost_usd" in leg and "estimated_cost" not in leg:
+                leg["estimated_cost"] = float(leg.get("estimated_cost_usd") or 0)
+            try:
+                transit_legs.append(TransitLeg(**leg))
+            except Exception:
+                continue
 
-    hotel_regions = data.get("hotel_regions", list({d.base_location for d in days}))
+    hotel_regions = list(
+        dict.fromkeys(
+            d.base_location for d in days
+            if d.base_location.strip().lower() != origin_lower
+        )
+    )
 
     # Fallback: if the architect produced nothing, build a single-base skeleton.
     if not days:

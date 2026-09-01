@@ -8,7 +8,6 @@ from app.crew.tools import (
     ground_transport_tool,
     hotel_search_tool,
     attraction_search_tool,
-    async_web_search_tool,
 )
 
 settings = get_settings()
@@ -49,7 +48,7 @@ itinerary_architect_agent = Agent(
     verbose=True,
     allow_delegation=False,
     max_iter=5,
-    tools=[async_web_search_tool],
+    tools=[],
     llm=primary_llm,
 )
 
@@ -66,7 +65,7 @@ travel_planner_agent = Agent(
     verbose=True,
     allow_delegation=False,
     max_iter=5,
-    tools=[flight_search_tool, ground_transport_tool, async_web_search_tool],
+    tools=[flight_search_tool, ground_transport_tool],
     llm=primary_llm,
 )
 
@@ -83,7 +82,7 @@ stay_planner_agent = Agent(
     verbose=True,
     allow_delegation=False,
     max_iter=5,
-    tools=[hotel_search_tool, async_web_search_tool],
+    tools=[hotel_search_tool],
     llm=primary_llm,
 )
 
@@ -100,7 +99,7 @@ sightseeing_planner_agent = Agent(
     verbose=True,
     allow_delegation=False,
     max_iter=5,
-    tools=[attraction_search_tool, distance_clustering_tool, async_web_search_tool],
+    tools=[attraction_search_tool, distance_clustering_tool],
     llm=primary_llm,
 )
 

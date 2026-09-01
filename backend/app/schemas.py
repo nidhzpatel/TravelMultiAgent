@@ -9,7 +9,10 @@ class TravelPlanRequest(BaseModel):
     start_date: date = Field(..., description="Trip start date")
     end_date: date = Field(..., description="Trip end date")
     travelers: int = Field(1, ge=1, description="Number of travelers")
-    total_budget_usd: float = Field(..., gt=0, description="Total trip budget in USD")
+    total_budget_usd: float = Field(..., gt=0, description="Total trip budget in USD (internal agent math)")
+    currency: str = Field("USD", description="Original currency code for display: USD, INR, EUR, GBP, etc.")
+    total_budget: float = Field(0, description="Original currency budget amount for display")
+    exchange_rate: float = Field(1.0, description="Original currency units per 1 USD")
     interests: List[str] = Field(default_factory=list, description="Travel interest tags")
     travel_style: str = Field("balanced", description="budget | balanced | luxury")
     cover_nearby: Optional[bool] = Field(True, description="Whether to include nearby places/day trips when days allow")
@@ -38,6 +41,7 @@ class TransitLeg(BaseModel):
     to_location: str
     mode: str = Field(..., description="flight | train | bus | metro | cab | walk")
     provider: str
+    estimated_cost: float
     estimated_cost_usd: float
     duration_minutes: int
     notes: str
@@ -65,6 +69,7 @@ class StayOption(BaseModel):
     hotel_name: str
     location: str
     room_type: str
+    estimated_cost: float
     estimated_cost_usd: float
     why_this_choice: str
     booking_notes: str
@@ -75,6 +80,7 @@ class ActivityItem(BaseModel):
     activity_name: str
     location: str
     category: str = Field(..., description="sightseeing | food | shopping | rest | transit")
+    estimated_cost: float
     estimated_cost_usd: float
     notes: str
 
@@ -88,18 +94,25 @@ class DayItinerary(BaseModel):
     activities: List[ActivityItem]
     transit_legs: List[TransitLeg]
     stay: Optional[StayOption]
+    daily_transit_cost: float
     daily_transit_cost_usd: float
+    daily_activity_cost: float
     daily_activity_cost_usd: float
+    daily_stay_cost: float
     daily_stay_cost_usd: float
+    total_daily_cost: float
     total_daily_cost_usd: float
 
 
 class MasterTravelItinerary(BaseModel):
     destination: str
     origin: Optional[str]
+    total_budget: float
     total_budget_usd: float
+    actual_calculated_cost: float
     actual_calculated_cost_usd: float
     currency: str = "USD"
+    exchange_rate: float = 1.0
     travelers: int
     days: List[DayItinerary]
     transit_summary: str
