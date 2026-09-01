@@ -120,22 +120,48 @@ export default function ChatInterface({
       let answerValue: string | number = value
       if (step.key === 'travelers') {
         answerValue = Number(value)
-      } else if (step.key === 'total_budget_usd') {
+        setAnswers((prev) => ({ ...prev, [step.key]: answerValue }))
+        advance()
+        return
+      }
+
+      if (step.key === 'total_budget_usd') {
         const hasCurrency = /[^0-9.,\s]/.test(value)
         if (hasCurrency) {
           try {
             const parsed = await parsePrompt({ prompt: value })
-            if (parsed.extracted.total_budget_usd !== undefined) {
-              answerValue = Number(parsed.extracted.total_budget_usd)
-            } else {
-              answerValue = Number(value.replace(/[^0-9.]/g, '')) || 0
+            const extracted = parsed.extracted
+            if (extracted.total_budget_usd !== undefined) {
+              setAnswers((prev) => ({
+                ...prev,
+                total_budget_usd: Number(extracted.total_budget_usd),
+                total_budget: Number(extracted.total_budget ?? extracted.total_budget_usd),
+                currency: (extracted.currency as string) || (prev.currency as string) || 'USD',
+                exchange_rate: Number(extracted.exchange_rate ?? prev.exchange_rate ?? 1),
+              }))
+              advance()
+              return
             }
           } catch {
-            answerValue = Number(value.replace(/[^0-9.]/g, '')) || 0
+            // fall through to numeric fallback
           }
-        } else {
-          answerValue = Number(value)
         }
+
+        const numeric = Number(value.replace(/[^0-9.]/g, '')) || 0
+        setAnswers((prev) => {
+          const currency = (prev.currency as string) || 'USD'
+          const exchangeRate = Number(prev.exchange_rate) || 1
+          const usdAmount = currency === 'USD' ? numeric : numeric / exchangeRate
+          return {
+            ...prev,
+            total_budget_usd: usdAmount,
+            total_budget: numeric,
+            currency,
+            exchange_rate: exchangeRate,
+          }
+        })
+        advance()
+        return
       }
 
       setAnswers((prev) => ({ ...prev, [step.key]: answerValue }))
