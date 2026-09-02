@@ -36,6 +36,8 @@ venv.bak/
 *.sqlite
 *.db
 output/
+architecture-mvp.md
+architecture.md
 .pytest_cache/
 .coverage
 htmlcov/
