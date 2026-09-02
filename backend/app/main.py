@@ -93,6 +93,47 @@ def _extract_json(raw: str) -> Any:
     return json.loads(match.group(0))
 
 
+def _extract_hotel_name_from_context(base: str, search_context: dict[str, str]) -> str | None:
+    """Try to pull a real hotel name from the Serper search context for a base location."""
+    context = search_context.get(f"hotel_{base}") or ""
+    if not context or "No live web results" in context or "MockHotel" in context:
+        return None
+
+    skip_phrases = [
+        "best", "top", "hotels in", "things to do", "what to do", "vs ",
+        "guide", "compare", "downtown hotels", "hotel destinations",
+        "find hotels", "book a stay",
+    ]
+
+    # Serper snippets often contain numbered lists like "1. Hard Rock Hotel Goa · 2. ...".
+    # Extract the first real-looking entry from those lists.
+    candidates = re.findall(
+        r"(?:\d+\.\s*|\d+\)\s*|•\s*|\-\s*)([A-Z][A-Za-z0-9&\s'’\-]{2,60}?)(?=\s*[·,;|\n]|$)",
+        context,
+    )
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if len(candidate.split()) < 2:
+            continue
+        lower = candidate.lower()
+        if any(phrase in lower for phrase in skip_phrases):
+            continue
+        return candidate
+
+    # Fallback: use the first non-listicle result title.
+    for line in context.splitlines():
+        line = line.strip()
+        if line.startswith("- "):
+            title = line[2:].split(":")[0].strip()
+            if not title:
+                continue
+            lower = title.lower()
+            if any(phrase in lower for phrase in skip_phrases):
+                continue
+            return title
+    return None
+
+
 # Maps currency symbols/words to ISO currency codes.
 _CURRENCY_SYMBOL_TO_CODE: dict[str, str] = {
     "inr": "INR",
@@ -491,26 +532,102 @@ _DIETARY_SYNONYMS = {
 }
 
 
-_NEARBY_PLACES = {
-    "goa": ["North Goa beaches", "South Goa heritage", "Dudhsagar Falls", "spice plantations"],
-    "manali": ["Solang Valley", "Rohtang Pass", "Old Manali", "Kullu Valley"],
-    "dubai": ["Abu Dhabi day trip", "Desert safari", "Sharjah heritage"],
-    "paris": ["Versailles", "Disneyland Paris", "Loire Valley"],
-    "rome": ["Vatican City", "Tivoli", "Pompeii"],
-    "tokyo": ["Nikko", "Hakone", "Kamakura"],
-    "mumbai": ["Lonavala", "Matheran", "Alibaug"],
-    "delhi": ["Agra / Taj Mahal", "Jaipur", "Rishikesh"],
-    "bangkok": ["Ayutthaya", "Damnoen Saduak floating market", "Pattaya"],
-    "bali": ["Nusa Penida", "Ubud rice terraces", "Mount Batur"],
-}
+def _clean_place_candidate(text: str) -> str | None:
+    """Clean a raw string into a concise place name, or return None if it is generic."""
+    text = re.sub(r"^(?:\d+\.\s*|\d+\)\s*|•\s*|\-\s*)", "", text)
+    text = re.sub(
+        r"\s+(day trips?|tours?|excursion|safari|cruise|full-day|half-day|private city|from|nearby|guide)$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    # Strip trailing noise like ellipsis, colons, dashes, or dangling "and".
+    text = re.sub(r"\s*[: ]\s*(?:\.{3}|…)\s*$", "", text).strip()
+    text = re.sub(r"\s*(?:\.{3}|…|:|–|-)\s*$", "", text).strip()
+    text = re.sub(r"\s+and\s*$", "", text, flags=re.IGNORECASE).strip()
+    if not text:
+        return None
+
+    words = text.split()
+    if len(words) < 1 or len(words) > 6:
+        return None
+
+    lower = text.lower()
+    blocklist = {
+        "things to do", "top things", "where to go", "places to avoid",
+        "dinner", "water sports", "combo", "updated", "recommended", "best",
+        "full day", "half day", "full-day", "sightseeing", "private tour", "city tour",
+        "day trips", "day trip", "foot", "feet", "high", "meter", "metre",
+        "private", "stay locations", "our most recommended", "stay around",
+        "a full", "the full", "safari", "guided", "one-day",
+        "getyourguide", "viator", "klook", "tripadvisor", "makemytrip", "jessieonajourney",
+    }
+    if any(phrase in lower for phrase in blocklist):
+        return None
+
+    if not any(w[0].isupper() for w in words if w):
+        return None
+
+    return text
 
 
-def _get_nearby_places(destination: str) -> list[str]:
-    """Return a short list of nearby places for well-known destinations."""
-    if not destination:
+async def _fetch_nearby_places_async(destination: str) -> list[str]:
+    """Fetch nearby day-trip places from Serper for any destination."""
+    if not destination or not settings.serper_api_key:
         return []
-    key = destination.lower().strip()
-    return _NEARBY_PLACES.get(key, [])
+
+    query = f"best day trips from {destination}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": settings.serper_api_key, "Content-Type": "application/json"},
+                json={"q": query, "num": 5},
+            )
+            response.raise_for_status()
+            data = response.json()
+    except Exception:
+        return []
+
+    places: list[str] = []
+
+    for item in data.get("organic", [])[:5]:
+        text = f"{item.get('title', '')} · {item.get('snippet', '')}"
+
+        # Pass 1: numbered / bulleted list items (e.g., "1. Dudhsagar Falls").
+        for match in re.finditer(
+            r"(?:\d+\.\s*|\d+\)\s*|•\s*|\-\s*)([A-Z][A-Za-z0-9&\s'’\-]{2,80}?)(?=\s*[·,;|\n]|$)",
+            text,
+        ):
+            candidate = _clean_place_candidate(match.group(1))
+            if candidate and candidate not in places:
+                places.append(candidate)
+
+        # Pass 2: split the whole text on common separators and clean each chunk.
+        for chunk in re.split(r"[·,;|()\n]\s*|\band\b", text):
+            candidate = _clean_place_candidate(chunk)
+            if candidate and candidate not in places:
+                places.append(candidate)
+
+        # Pass 3: explicit place-like noun phrases ending in known location nouns.
+        for match in re.finditer(
+            r"([A-Z][A-Za-z0-9\s'’\-]{1,40}(?:Falls|Plantation|Beach|Fort|Temple|Island|City|Park|Gardens|Valley|Hills|Dam|Lake|Palace|Monastery|Church|Mosque))",
+            text,
+        ):
+            candidate = _clean_place_candidate(match.group(1))
+            if candidate and candidate not in places:
+                places.append(candidate)
+
+    # Drop shorter candidates that are substrings of a longer one (e.g. "Dudhsagar"
+    # when "Dudhsagar Falls" is already present).
+    deduped: list[str] = []
+    for place in places:
+        place_lower = place.lower()
+        if any(place_lower in existing.lower() or existing.lower() in place_lower for existing in deduped):
+            continue
+        deduped.append(place)
+
+    return deduped[:5]
 
 
 def _should_cover_nearby(prompt: str, parsed_cover: Any) -> bool:
@@ -733,27 +850,27 @@ def _default_activities(day_number: int, destination: str, exchange_rate: float 
             activity_name="Central Museum",
             location=f"{destination} Museum District",
             category="sightseeing",
-            estimated_cost_usd=15.0,
-            estimated_cost=_to_original(15.0, exchange_rate),
-            notes="Visit the main museum and galleries.",
+            estimated_cost_usd=0.0,
+            estimated_cost=_to_original(0.0, exchange_rate),
+            notes="Entrance fees are not included in the package.",
         ),
         ActivityItem(
             time_slot="05:00 PM - 6:30 PM",
             activity_name="Panoramic Viewpoint",
             location=f"{destination} Skyline Deck",
             category="sightseeing",
-            estimated_cost_usd=10.0,
-            estimated_cost=_to_original(10.0, exchange_rate),
-            notes="Enjoy skyline and sunset views.",
+            estimated_cost_usd=0.0,
+            estimated_cost=_to_original(0.0, exchange_rate),
+            notes="Entrance fees are not included in the package.",
         ),
         ActivityItem(
             time_slot="07:00 PM - 8:30 PM",
             activity_name="Famous Landmark Visit",
             location=f"{destination} City Center",
             category="sightseeing",
-            estimated_cost_usd=8.0,
-            estimated_cost=_to_original(8.0, exchange_rate),
-            notes="See an iconic temple, monument, or landmark.",
+            estimated_cost_usd=0.0,
+            estimated_cost=_to_original(0.0, exchange_rate),
+            notes="Entrance fees are not included in the package.",
         ),
         ActivityItem(
             time_slot="09:00 PM - 10:30 PM",
@@ -769,27 +886,27 @@ def _default_activities(day_number: int, destination: str, exchange_rate: float 
             activity_name="Local Neighborhood Explore",
             location=f"{destination} Arts Quarter",
             category="sightseeing",
-            estimated_cost_usd=5.0,
-            estimated_cost=_to_original(5.0, exchange_rate),
-            notes="Wander through galleries, street art, and local cafés.",
+            estimated_cost_usd=0.0,
+            estimated_cost=_to_original(0.0, exchange_rate),
+            notes="Entrance fees are not included in the package.",
         ),
         ActivityItem(
             time_slot="02:00 PM - 4:00 PM",
             activity_name="Scenic Park or Garden",
             location=f"{destination} Central Park",
             category="sightseeing",
-            estimated_cost_usd=3.0,
-            estimated_cost=_to_original(3.0, exchange_rate),
-            notes="Relax in a green space and people-watch.",
+            estimated_cost_usd=0.0,
+            estimated_cost=_to_original(0.0, exchange_rate),
+            notes="Entrance fees are not included in the package.",
         ),
         ActivityItem(
             time_slot="06:00 PM - 7:30 PM",
             activity_name="Shopping & Souvenirs",
             location=f"{destination} Shopping District",
             category="shopping",
-            estimated_cost_usd=15.0,
-            estimated_cost=_to_original(15.0, exchange_rate),
-            notes="Browse local shops and pick up souvenirs.",
+            estimated_cost_usd=0.0,
+            estimated_cost=_to_original(0.0, exchange_rate),
+            notes="Shopping purchases are not included in the package.",
         ),
     ]
 
@@ -933,10 +1050,12 @@ def _build_itinerary(
             base = skeleton_day.base_location if skeleton_day else request.destination
             region = skeleton_day.region if skeleton_day else base
             stay_cost_usd = nightly * request.travelers
+            real_hotel = _extract_hotel_name_from_context(base, search_context)
+            hotel_name = real_hotel or f"Hotel in {region}"
             stays.append(
                 StayOption(
                     night_number=night,
-                    hotel_name=f"Hotel in {region}",
+                    hotel_name=hotel_name,
                     location=f"{base} — {region}",
                     room_type=f"{request.travel_style} room",
                     estimated_cost_usd=stay_cost_usd,
@@ -962,14 +1081,19 @@ def _build_itinerary(
             if isinstance(d, dict) and d.get("day_number") == day_number and isinstance(d.get("activities"), list):
                 for a in d["activities"]:
                     if isinstance(a, dict):
+                        category = a.get("category", "sightseeing")
+                        # Package model: we only charge for food and local transport.
+                        # Entrance fees, attraction tickets, and shopping are excluded.
+                        raw_cost = float(a.get("estimated_cost_usd", 0) or 0)
+                        cost_usd = raw_cost if category in ("food", "transit") else 0.0
                         activities.append(
                             ActivityItem(
                                 time_slot=a.get("time_slot", "TBD"),
                                 activity_name=a.get("activity_name", "Activity"),
                                 location=a.get("location", skeleton_day.region if skeleton_day else request.destination),
-                                category=a.get("category", "sightseeing"),
-                                estimated_cost_usd=float(a.get("estimated_cost_usd", 0) or 0),
-                                estimated_cost=_to_original(float(a.get("estimated_cost_usd", 0) or 0), exchange_rate),
+                                category=category,
+                                estimated_cost_usd=cost_usd,
+                                estimated_cost=_to_original(cost_usd, exchange_rate),
                                 notes=a.get("notes", ""),
                             )
                         )
@@ -1109,15 +1233,21 @@ def _fill_display_currency(data: dict, exchange_rate: float) -> dict:
 
 
 def _recompute_display_costs(data: dict, exchange_rate: float) -> dict:
-    """Recompute all display-currency cost fields from their USD counterparts."""
+    """Recompute all display-currency cost fields from their USD counterparts.
+
+    Preserves the user's original total_budget amount (it is an input, not a
+    derived value) so currencies like INR do not drift by a few rupees due to
+    USD rounding.
+    """
     if not isinstance(data, dict):
         return data
 
-    def recalc(pair_usd: str, pair: str, obj: dict) -> None:
-        if pair_usd in obj:
+    def recalc(pair_usd: str, pair: str, obj: dict, overwrite: bool = True) -> None:
+        if pair_usd in obj and (overwrite or pair not in obj):
             obj[pair] = _to_original(float(obj[pair_usd] or 0), exchange_rate)
 
-    recalc("total_budget_usd", "total_budget", data)
+    # total_budget is the user's original input; only fill it if missing.
+    recalc("total_budget_usd", "total_budget", data, overwrite=False)
     recalc("actual_calculated_cost_usd", "actual_calculated_cost", data)
 
     for day in data.get("days", []):
@@ -1609,7 +1739,7 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
 
     nearby_places: list[str] = []
     if cover_nearby and number_of_days >= 4:
-        nearby_places = _get_nearby_places(destination_value)
+        nearby_places = await _fetch_nearby_places_async(destination_value)
     extracted["nearby_places"] = nearby_places
 
     # Recompute missing from the final extracted set so any field we filled in post-processing is no longer missing.
@@ -1630,14 +1760,17 @@ async def _build_draft_itinerary(request: TravelPlanRequest, inputs: dict[str, A
 
     raw_days = [item for item in data.get("days", []) if isinstance(item, dict)]
 
-    # Correct architect mistakes: the first night's base should not be the origin,
-    # and the origin should not appear as a hotel region.
+    # Correct architect mistakes: the first night's base (and its region) should
+    # not be the origin; the origin should not appear as a hotel region.
     origin_lower = request.origin.strip().lower()
     destination_lower = request.destination.strip().lower()
     for item in raw_days:
         base = (item.get("base_location") or "").strip().lower()
+        region = (item.get("region") or "").strip().lower()
         if base == origin_lower and base != destination_lower:
             item["base_location"] = request.destination
+        if region == origin_lower and region != destination_lower:
+            item["region"] = request.destination
 
     days: list[DraftItineraryDay] = []
     for item in raw_days:
@@ -1751,7 +1884,7 @@ async def _run_search_tools(request: TravelPlanRequest, draft: DraftItinerary) -
 async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
     session_id = str(uuid.uuid4())
 
-    nearby_places = _get_nearby_places(plan_request.destination) if plan_request.cover_nearby else []
+    nearby_places = await _fetch_nearby_places_async(plan_request.destination) if plan_request.cover_nearby else []
     inputs = _build_inputs(plan_request, nearby_places=nearby_places)
     parsed_raw = _build_parsed_raw(plan_request)
 

@@ -35,6 +35,7 @@ venv.bak/
 *.log
 *.sqlite
 *.db
+output/
 .pytest_cache/
 .coverage
 htmlcov/
