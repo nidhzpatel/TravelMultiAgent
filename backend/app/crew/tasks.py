@@ -3,6 +3,7 @@ from app.crew.agents import (
     input_parser_agent,
     itinerary_architect_agent,
     travel_planner_agent,
+    transit_mode_selector_agent,
     stay_planner_agent,
     sightseeing_planner_agent,
     itinerary_assembler_agent,
@@ -22,6 +23,7 @@ parse_input_task = Task(
         "- total_budget_usd: budget number exactly as written (do NOT convert currency)\n"
         "- interests: list of things they want to do\n"
         "- travel_style: 'budget', 'balanced', or 'luxury' if they mention it (optional)\n"
+        "- transport_preference: 'flight', 'train', or 'bus' ONLY if they explicitly say how they want to travel (e.g., 'by train', 'want flight', 'bus is fine')\n"
         "- cover_nearby: true/false — true unless user explicitly says 'only X', 'no nearby', 'single destination'\n"
         "- dietary_notes: any food restrictions\n"
         "- mobility_notes: any walking/access needs\n"
@@ -97,9 +99,30 @@ build_skeleton_task = Task(
 )
 
 
+select_transit_mode_task = Task(
+    description=(
+        "Decide the best transport mode for the main intercity route: {origin} -> {destination} "
+        "on {start_date} for {travelers} traveler(s), style {travel_style}.\n"
+        "User's transport preference (if any): {transport_preference}\n\n"
+        "Use your search tools to check real flight, train, and bus options for this route, then decide.\n\n"
+        "Decision policy (apply in this order):\n"
+        "1. If the user explicitly asked for a mode (e.g., 'by train', 'want flight', 'bus is fine'), choose it. State that the preference was explicit.\n"
+        "2. Short routes (roughly under 300 km) favor bus or train over flying.\n"
+        "3. Among the reasonable options, choose the CHEAPEST total for the group.\n"
+        "4. If two options cost about the same (within ~15%), choose the FASTER one.\n"
+        "5. Overnight trains and comfortable Volvo buses are valid choices and often beat flights on short/medium routes.\n\n"
+        "Output ONLY a raw JSON object:\n"
+        '{{"mode": "flight|train|bus", "provider_hint": "a real operator name like IndiGo, Indian Railways, or RedBus Volvo", '
+        '"estimated_cost_usd_per_person": N, "duration_minutes": N, "alternatives_considered": "...", "reasoning": "one or two sentences"}}'
+    ),
+    expected_output="A raw JSON object with the chosen mode, per-person cost, duration, and reasoning.",
+    agent=transit_mode_selector_agent,
+)
+
+
 plan_travel_task = Task(
     description=(
-        "Using the parsed request, route skeleton, and real search context, plan all transit.\n"
+        "Using the parsed request, route skeleton, selected transport mode, and real search context, plan all transit.\n"
         "Origin: {origin}\n"
         "Destination: {destination}\n"
         "Start date: {start_date}\n"
@@ -108,10 +131,11 @@ plan_travel_task = Task(
         "Travel style: {travel_style}\n"
         "Total transit budget (USD): {budget_transit_usd}\n"
         "Route skeleton: {skeleton}\n"
+        "Selected intercity mode decision: {transit_mode_decision}\n"
         "Real search context: {search_context}\n\n"
         "Rules:\n"
         "1. Use the route skeleton to know the first and last base location.\n"
-        "2. Include an outbound leg from origin to the first base on day 1, and a return leg from the last base to origin on the final day.\n"
+        "2. You MUST include an outbound leg from origin to the first base on day 1, and a return leg from the last base to origin on the final day. Use the selected mode decision's mode, cost, and duration for these main legs unless the user explicitly asked otherwise. These two legs are mandatory — outputting only local hops is a failure.\n"
         "3. Use provider names and rough prices from the search context. Do not use MockAir.\n"
         "4. Plan daily local transport (cab, bus, metro, walk) between the accommodation and activity clusters.\n"
         "5. Keep the sum of all transit legs within the Total transit budget (USD).\n"
@@ -157,7 +181,8 @@ plan_sightseeing_task = Task(
         "Dietary notes: {dietary_notes}\n"
         "Total food/local-roaming budget (USD): {budget_food_usd}\n"
         "Route skeleton: {skeleton}\n"
-        "Real search context: {search_context}\n\n"
+        "Real search context: {search_context}\n"
+        "Famous attractions that MUST appear in the plan (use these exact names): {must_see}\n\n"
         "Business model (important):\n"
         "- This is a travel package: travel, stay, meals, and local cabs are included.\n"
         "- Activity ENTRANCE FEES and optional experiences are NOT included.\n"
@@ -165,11 +190,13 @@ plan_sightseeing_task = Task(
         "- Use category 'food' for meals and 'transit' for local cab to the spot; use 'sightseeing' for places visited (cost 0).\n\n"
         "Rules:\n"
         "1. Use the skeleton's day theme, region, and activity_focus to choose real attractions from the search context.\n"
-        "2. Cluster activities by the day's region to minimize transit.\n"
-        "3. Assign realistic time slots and meal breaks.\n"
-        "4. Respect dietary and mobility notes.\n"
-        "5. Keep the sum of all food/transit costs within the Total food/local-roaming budget (USD).\n"
-        "6. Do not invent generic attractions. Use real place names from the search context.\n"
+        "2. Every famous attraction listed above must appear somewhere in the plan.\n"
+        "3. Every activity must belong to the day's region — never schedule an attraction in a city the day is not in.\n"
+        "4. Cluster activities by the day's region to minimize transit.\n"
+        "5. Assign realistic time slots and meal breaks.\n"
+        "6. Respect dietary and mobility notes.\n"
+        "7. Keep the sum of all food/transit costs within the Total food/local-roaming budget (USD).\n"
+        "8. Do not invent generic attractions. Use real place names from the search context.\n"
         "Output ONLY a raw JSON array of day objects with no markdown or explanations. Each day object must have:\n"
         '{{"day_number": N, "theme": "...", "activities": [{{"time_slot": "...", "activity_name": "...", '
         '"location": "...", "category": "sightseeing|food|transit|rest", "estimated_cost_usd": N, "notes": "..."}}]}}'
@@ -201,6 +228,7 @@ assemble_itinerary_task = Task(
         "Transit legs (JSON array): {transit_raw}\n\n"
         "Stay options (JSON array): {stay_raw}\n\n"
         "Sightseeing days (JSON array): {sightseeing_raw}\n\n"
+        "Famous attractions that MUST appear in the final plan: {must_see}\n\n"
         "Business model (important):\n"
         "- Travel, stay, meals, and local cabs are included.\n"
         "- Activity entrance fees and optional experiences are NOT included.\n"
@@ -211,6 +239,7 @@ assemble_itinerary_task = Task(
         "3. Replace generic or invalid hotel names (e.g., shops, restaurants, attractions) with real hotel names from the search context.\n"
         "4. Replace generic activity names like 'Historic Downtown Walk' with real place names from the search context.\n"
         "5. Match activities to the day's region; remove or relocate activities that are far away.\n"
+        "6. Ensure every famous attraction listed above appears at least once.\n"
         "6. Consolidate consecutive nights at the same base to a single hotel.\n"
         "7. Ensure every day has at least 2–3 activities with realistic time slots.\n"
         "8. Keep arrival/return transit legs on day 1 and the last day.\n"

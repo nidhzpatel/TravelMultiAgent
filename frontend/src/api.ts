@@ -1,4 +1,13 @@
-import type { TravelPlanRequest, TravelPlanResponse, PromptParseRequest, PromptParseResponse } from './types'
+import type {
+  TravelPlanRequest,
+  TravelPlanResponse,
+  PromptParseRequest,
+  PromptParseResponse,
+  ChatCreateRequest,
+  ChatMessageRequest,
+  ChatMessageResponse,
+  ChatSession,
+} from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -43,4 +52,65 @@ export async function parsePrompt(
 export async function healthCheck(): Promise<{ status: string }> {
   const res = await fetch(`${API_BASE}/health`)
   return res.json() as Promise<{ status: string }>
+}
+
+export async function createChat(
+  request: ChatCreateRequest,
+  signal?: AbortSignal,
+): Promise<ChatMessageResponse> {
+  const res = await fetch(`${API_BASE}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+    signal,
+  })
+
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(err || 'Failed to create chat')
+  }
+
+  return res.json() as Promise<ChatMessageResponse>
+}
+
+export async function sendChatMessage(
+  sessionId: string,
+  request: ChatMessageRequest,
+  signal?: AbortSignal,
+): Promise<ChatMessageResponse> {
+  const res = await fetch(`${API_BASE}/chat/${sessionId}/message`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+    signal,
+  })
+
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(err || 'Failed to send message')
+  }
+
+  return res.json() as Promise<ChatMessageResponse>
+}
+
+export async function getChat(sessionId: string): Promise<ChatSession> {
+  const res = await fetch(`${API_BASE}/chat/${sessionId}`)
+
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(err || 'Failed to load chat')
+  }
+
+  return res.json() as Promise<ChatSession>
+}
+
+export async function listChats(): Promise<ChatSession[]> {
+  const res = await fetch(`${API_BASE}/chats`)
+
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(err || 'Failed to list chats')
+  }
+
+  return res.json() as Promise<ChatSession[]>
 }

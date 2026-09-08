@@ -18,6 +18,7 @@ class TravelPlanRequest(BaseModel):
     cover_nearby: Optional[bool] = Field(True, description="Whether to include nearby places/day trips when days allow")
     dietary_notes: Optional[str] = Field(None, description="Dietary restrictions or preferences")
     mobility_notes: Optional[str] = Field(None, description="Mobility constraints")
+    transport_preference: Optional[str] = Field(None, description="Explicit user choice: flight | train | bus (None = let the transit mode selector decide)")
     free_text: Optional[str] = Field(None, description="Additional natural-language context")
 
 
@@ -80,6 +81,17 @@ class ActivityItem(BaseModel):
     activity_name: str
     location: str
     category: str = Field(..., description="sightseeing | food | shopping | rest | transit")
+    # Activity prices (sightseeing, attractions, meals) are intentionally hidden
+    # from the traveler; only the plan is shown. None means "not priced".
+    estimated_cost: Optional[float] = None
+    estimated_cost_usd: Optional[float] = None
+    notes: str
+
+
+class CabServiceCharge(BaseModel):
+    vehicle_type: str = Field(..., description="e.g., 'Private AC Sedan'")
+    coverage: str = Field(..., description="What the cab package covers")
+    total_days: int
     estimated_cost: float
     estimated_cost_usd: float
     notes: str
@@ -119,6 +131,7 @@ class MasterTravelItinerary(BaseModel):
     stay_summary: str
     sightseeing_summary: str
     trip_scope: Optional[str] = Field(None, description="e.g., 'Goa + nearby day trips'")
+    cab_service: Optional[CabServiceCharge] = Field(None, description="Overall cab package charge for the whole trip")
     inclusions: List[str] = Field(default_factory=list)
     exclusions: List[str] = Field(default_factory=list)
     notes: List[str]
@@ -139,3 +152,34 @@ class PromptParseResponse(BaseModel):
     extracted: dict = Field(default_factory=dict, description="Fields successfully extracted from the prompt")
     missing: List[str] = Field(default_factory=list, description="Required fields still missing")
     parsed: dict = Field(default_factory=dict, description="Full parsed object returned by the parser agent")
+
+
+class ChatMessage(BaseModel):
+    role: str = Field(..., description="user | assistant | system")
+    content: str
+    type: str = Field("text", description="text | itinerary_update | alternatives")
+    payload: dict = Field(default_factory=dict)
+    created_at: str = Field("", description="ISO timestamp")
+
+
+class ChatSession(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    messages: List[ChatMessage]
+    current_itinerary: Optional[MasterTravelItinerary] = None
+
+
+class ChatCreateRequest(BaseModel):
+    message: str = Field(..., min_length=1, description="First user message")
+
+
+class ChatMessageRequest(BaseModel):
+    message: str = Field(..., min_length=1, description="User follow-up message")
+
+
+class ChatMessageResponse(BaseModel):
+    session_id: str
+    message: ChatMessage
+    session: ChatSession

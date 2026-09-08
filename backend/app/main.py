@@ -1,11 +1,13 @@
 import asyncio
 import json
+import logging
 import re
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,6 +15,8 @@ import httpx
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fpdf import FPDF
+
+logger = logging.getLogger(__name__)
 
 from app.config import get_settings
 from app.schemas import (
@@ -27,10 +31,16 @@ from app.schemas import (
     StayOption,
     DraftItinerary,
     DraftItineraryDay,
+    ChatSession,
+    ChatMessage,
+    ChatCreateRequest,
+    ChatMessageRequest,
+    ChatMessageResponse,
 )
 from app.crew.crew import (
     build_parse_crew,
     build_skeleton_crew,
+    build_transit_mode_crew,
     build_travel_crew,
     build_stay_crew,
     build_sightseeing_crew,
@@ -41,15 +51,54 @@ from app.crew.tools import (
     hotel_search_tool,
     attraction_search_tool,
 )
+from app.swarm.runner import SwarmRunner
+from app.swarm.blackboard import Blackboard
 
 settings = get_settings()
 
 # In-memory store for completed itineraries so the PDF endpoint can fetch them by session_id.
 itinerary_store: dict[str, MasterTravelItinerary] = {}
 
+# In-memory store for chat sessions.
+chat_store: dict[str, ChatSession] = {}
+
+# Simple JSON persistence so chats/itineraries survive server reloads.
+STORE_FILE = Path(__file__).resolve().parent.parent / "data" / "store.json"
+
+
+def _persist_stores() -> None:
+    """Write chat_store and itinerary_store to disk. Failures are non-fatal."""
+    try:
+        STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "chats": {sid: session.model_dump(mode="json") for sid, session in chat_store.items()},
+            "itineraries": {sid: it.model_dump(mode="json") for sid, it in itinerary_store.items()},
+        }
+        STORE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to persist stores: %s", exc)
+
+
+def _load_stores() -> None:
+    """Restore chat_store and itinerary_store from disk, if present."""
+    if not STORE_FILE.exists():
+        return
+    try:
+        payload = json.loads(STORE_FILE.read_text(encoding="utf-8"))
+        for sid, data in payload.get("itineraries", {}).items():
+            data = _apply_display_pricing(data, "balanced")
+            itinerary_store[sid] = MasterTravelItinerary(**data)
+        for sid, data in payload.get("chats", {}).items():
+            chat_store[sid] = ChatSession(**data)
+        if chat_store:
+            logger.info("Restored %d chat session(s) from %s", len(chat_store), STORE_FILE)
+    except Exception as exc:
+        logger.warning("Failed to load persisted stores: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _load_stores()
     yield
 
 
@@ -266,12 +315,20 @@ def _fetch_exchange_rates() -> dict[str, float]:
 _BUDGET_RE = re.compile(
     r"(?:budget\s*(?:of|is|around|about|approx|approximately)?\s*)"
     r"(?:[₹€£$]|inr|rs|rupees?|euros?|pounds?|gbp)?\s*"
-    r"([\d,]+(?:\.\d+)?)\s*(k|thousand|million|mn|m)?\s*"
+    r"([\d,]+(?:\.\d+)?)\s*(k|thousand|million|mn|m|lakhs?|lacs?|crores?|cr)?\s*"
     r"(?:inr|rs|rupees?|euros?|pounds?|gbp|[₹€£$])?|"
     r"(?:[₹€£$]|inr|rs|rupees?|euros?|pounds?|gbp)\s*"
-    r"([\d,]+(?:\.\d+)?)\s*(k|thousand|million|mn|m)?|"
-    r"([\d,]+(?:\.\d+)?)\s*(k|thousand|million|mn|m)?\s*"
+    r"([\d,]+(?:\.\d+)?)\s*(k|thousand|million|mn|m|lakhs?|lacs?|crores?|cr)?|"
+    r"([\d,]+(?:\.\d+)?)\s*(k|thousand|million|mn|m|lakhs?|lacs?|crores?|cr)?\s*"
     r"(?:inr|rs|rupees?|euros?|pounds?|gbp|[₹€£$])",
+    re.IGNORECASE,
+)
+
+# Explicit "total budget of X" phrase — preferred over per-person figures.
+_TOTAL_BUDGET_RE = re.compile(
+    r"total\s+budget\s*(?:of|is|around|about|approx|approximately)?\s*"
+    r"(?:[₹€£$]|inr|rs|rupees?|euros?|pounds?|gbp)?\s*"
+    r"([\d,]+(?:\.\d+)?)\s*(k|thousand|million|mn|m|lakhs?|lacs?|crores?|cr)?",
     re.IGNORECASE,
 )
 
@@ -281,6 +338,13 @@ _NUMBER_WORDS = {
     "million": 1_000_000,
     "mn": 1_000_000,
     "m": 1_000_000,
+    "lakh": 100_000,
+    "lakhs": 100_000,
+    "lac": 100_000,
+    "lacs": 100_000,
+    "crore": 10_000_000,
+    "crores": 10_000_000,
+    "cr": 10_000_000,
 }
 
 _DATE_FORMATS = [
@@ -375,6 +439,12 @@ _TRIP_DURATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Phrases like "for 10 days" / "lasting 10 days" that state a duration directly.
+_FOR_DAYS_RE = re.compile(
+    r"\b(?:for|lasting|of)\s+(\d+)\s*(?:days?|nights?)\b",
+    re.IGNORECASE,
+)
+
 _RELATIVE_DATE_RE = re.compile(
     r"\b(today|tomorrow|yesterday|next\s+week|this\s+week|coming\s+week)\b",
     re.IGNORECASE,
@@ -446,6 +516,9 @@ def _detect_currency_from_prompt(prompt: str) -> str | None:
     for symbol in sorted(_CURRENCY_SYMBOL_TO_CODE.keys(), key=len, reverse=True):
         if symbol in prompt_lower:
             return _CURRENCY_SYMBOL_TO_CODE[symbol]
+    # Indian number words (lakh/lac/crore) unambiguously mean INR.
+    if re.search(r"\b(?:lakhs?|lacs?|crores?|cr)\b", prompt_lower):
+        return "INR"
     return None
 
 
@@ -458,11 +531,13 @@ def _infer_currency_from_locations(origin: str, destination: str) -> str | None:
     return None
 
 
-def _normalize_budget(value: Any, prompt: str, origin: str, destination: str) -> tuple[float, str, float] | None:
+def _normalize_budget(value: Any, prompt: str, origin: str, destination: str, travelers: int = 1) -> tuple[float, str, float] | None:
     """Convert a budget value to USD while preserving the original currency.
 
     Returns (usd_amount, currency_code, exchange_rate) or None on failure.
-    Handles formats like 4000, $4,000, 4k, 4 thousand, ₹2,00,000, 200000 INR.
+    Handles formats like 4000, $4,000, 4k, 4 thousand, ₹2,00,000, 200000 INR,
+    2 lakh, 1.5 crore. Prefers an explicit "total budget of X"; multiplies
+    per-person figures by the traveler count.
     """
     prompt_lower = prompt.lower()
 
@@ -482,23 +557,41 @@ def _normalize_budget(value: Any, prompt: str, origin: str, destination: str) ->
     if exchange_rate is None:
         exchange_rate = _CURRENCY_RATES.get(currency_code.lower(), 1.0)
 
-    # Parse the raw amount from the prompt if possible.
+    def _amount_to_usd(raw_amount_str: str, multiplier_word: str) -> tuple[float, str, float] | None:
+        try:
+            raw_amount = float(raw_amount_str.replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        multiplier = _NUMBER_WORDS.get(multiplier_word.lower(), 1)
+        original_amount = raw_amount * multiplier
+        usd_amount = original_amount / exchange_rate
+        return round(usd_amount, 2), currency_code.upper(), exchange_rate
+
+    # 4. An explicit "total budget of X" beats per-person phrasing.
+    total_match = _TOTAL_BUDGET_RE.search(prompt)
+    if total_match:
+        result = _amount_to_usd(total_match.group(1), total_match.group(2) or "")
+        if result is not None:
+            return result
+
+    # 5. Parse the raw amount from the prompt if possible.
     match = _BUDGET_RE.search(prompt)
     if match:
         raw_amount_str = (
             match.group(1) or match.group(3) or match.group(5) or ""
-        ).replace(",", "")
+        )
         multiplier_word = (
             match.group(2) or match.group(4) or match.group(6) or ""
-        ).lower()
-        try:
-            raw_amount = float(raw_amount_str)
-            multiplier = _NUMBER_WORDS.get(multiplier_word, 1)
-            original_amount = raw_amount * multiplier
-            usd_amount = original_amount / exchange_rate
-            return round(usd_amount, 2), currency_code.upper(), exchange_rate
-        except (TypeError, ValueError):
-            pass
+        )
+        result = _amount_to_usd(raw_amount_str, multiplier_word)
+        if result is not None:
+            usd_amount, code, rate = result
+            # Per-person budget: multiply by traveler count.
+            if travelers > 1 and re.search(r"per\s+(person|head|pax)", prompt_lower):
+                original_amount = float(raw_amount_str.replace(",", "")) * _NUMBER_WORDS.get(multiplier_word.lower(), 1)
+                total_original = original_amount * travelers
+                return round(total_original / rate, 2), code, rate
+            return result
 
     # Fallback: trust the numeric value and treat it as the original currency.
     try:
@@ -569,6 +662,93 @@ def _clean_place_candidate(text: str) -> str | None:
         return None
 
     return text
+
+
+# Famous attractions per destination. Injected into the sightseeing/assembler
+# crew prompts AND used as a deterministic fallback: generic filler activities
+# are replaced with these names when the crews fail to produce real places.
+_MUST_SEE_ATTRACTIONS: dict[str, list[str]] = {
+    "mt abu": ["Dilwara Temples", "Nakki Lake", "Guru Shikhar", "Sunset Point", "Toad Rock", "Achalgarh Fort", "Peace Park (Brahma Kumaris)", "Trevor's Tank"],
+    "goa": ["Baga Beach", "Fort Aguada", "Basilica of Bom Jesus", "Dudhsagar Falls", "Anjuna Flea Market", "Chapora Fort", "Candolim Beach", "Divar Island"],
+    "udaipur": ["City Palace", "Lake Pichola boat ride", "Jag Mandir", "Saheliyon Ki Bari", "Jagdish Temple", "Sajjangarh Monsoon Palace", "Fateh Sagar Lake"],
+    "jodhpur": ["Mehrangarh Fort", "Jaswant Thada", "Umaid Bhawan Palace", "Clock Tower & Sardar Market", "Mandore Gardens", "Toorji Ka Jhalra"],
+    "jaipur": ["Amber Fort", "Hawa Mahal", "City Palace", "Jantar Mantar", "Nahargarh Fort", "Bapu Bazaar"],
+    "manali": ["Solang Valley", "Hidimba Devi Temple", "Old Manali", "Jogini Waterfall", "Manu Temple", "Nehru Kund"],
+    "dubai": ["Burj Khalifa", "Dubai Fountain Show", "Palm Jumeirah", "Dubai Marina", "Desert Safari", "Dubai Creek & Gold Souk", "Miracle Garden"],
+    "mumbai": ["Gateway of India", "Marine Drive", "Elephanta Caves", "Colaba Causeway", "Siddhivinayak Temple", "Juhu Beach"],
+    "delhi": ["Red Fort", "Qutub Minar", "India Gate", "Humayun's Tomb", "Lotus Temple", "Chandni Chowk"],
+    "bangkok": ["Grand Palace", "Wat Arun", "Wat Pho", "Chatuchak Market", "Chao Phraya cruise", "Jim Thompson House"],
+    "bali": ["Uluwatu Temple", "Tegallalang Rice Terraces", "Ubud Monkey Forest", "Tanah Lot", "Mount Batur", "Tirta Empul"],
+    "paris": ["Eiffel Tower", "Louvre Museum", "Notre-Dame", "Seine River cruise", "Montmartre & Sacré-Cœur", "Arc de Triomphe"],
+    "tokyo": ["Senso-ji Temple", "Meiji Shrine", "Shibuya Crossing", "Tokyo Skytree", "Tsukiji Outer Market", "Shinjuku Gyoen"],
+}
+
+# How many days a destination actually needs (with nearby places), so we can
+# tell the traveler instead of padding the plan with filler.
+_RECOMMENDED_DAYS: dict[str, str] = {
+    "mt abu": "Mt Abu itself needs 2–3 days; 4–5 days comfortably covers nearby Udaipur/Jodhpur",
+    "goa": "Goa needs 4–5 days (7+ with nearby heritage and waterfalls)",
+    "manali": "Manali needs 3–4 days (5–6 with Solang/Rohtang)",
+    "udaipur": "Udaipur needs 2–3 days",
+    "jodhpur": "Jodhpur needs 2 days",
+    "jaipur": "Jaipur needs 2–3 days",
+    "dubai": "Dubai needs 4–5 days",
+    "mumbai": "Mumbai needs 2–3 days",
+    "delhi": "Delhi needs 3–4 days (5–6 with Agra/Jaipur)",
+    "bangkok": "Bangkok needs 3–4 days",
+    "bali": "Bali needs 5–7 days",
+    "paris": "Paris needs 3–4 days",
+    "tokyo": "Tokyo needs 4–5 days",
+}
+
+# Generic filler activity names produced when the crews lack real data. These
+# get replaced with must-see attractions when possible.
+_GENERIC_ACTIVITY_NAMES = {
+    "historic downtown walk", "local neighborhood explore", "famous landmark visit",
+    "central museum", "panoramic viewpoint", "scenic park or garden",
+    "local food market", "evening food & nightlife",
+}
+
+
+def _must_see_key(place: str) -> str | None:
+    """Return the _MUST_SEE_ATTRACTIONS key that appears in the place name."""
+    if not place:
+        return None
+    lowered = place.lower()
+    # Aliases resolve to the canonical key so cross-city checks compare equal.
+    if "mount abu" in lowered or "mt. abu" in lowered:
+        return "mt abu"
+    for key in _MUST_SEE_ATTRACTIONS:
+        if key in lowered:
+            return key
+    return None
+
+
+def _must_see_for(place: str) -> list[str]:
+    """Return the famous-attraction list whose key appears in the place name."""
+    key = _must_see_key(place)
+    return list(_MUST_SEE_ATTRACTIONS[key]) if key else []
+
+
+# Maps a known attraction name back to its city, so we can detect activities
+# scheduled in the wrong city (e.g., Mehrangarh Fort on a Mt Abu day).
+_ATTRACTION_CITY = {
+    attraction.lower(): city
+    for city, attractions in _MUST_SEE_ATTRACTIONS.items()
+    for attraction in attractions
+}
+
+
+def _recommended_days_for(place: str) -> str | None:
+    if not place:
+        return None
+    lowered = place.lower()
+    if "mount abu" in lowered or "mt. abu" in lowered:
+        return _RECOMMENDED_DAYS["mt abu"]
+    for key, recommendation in _RECOMMENDED_DAYS.items():
+        if key in lowered:
+            return recommendation
+    return None
 
 
 async def _fetch_nearby_places_async(destination: str) -> list[str]:
@@ -665,6 +845,22 @@ def _normalize_interests(interests: list[str]) -> list[str]:
         if not matched and item_lower and item_lower not in normalized:
             normalized.append(item_lower)
     return normalized
+
+
+# Interests used when the user doesn't mention any: assume they want a bit of everything.
+_DEFAULT_INTERESTS = [
+    "sightseeing",
+    "food",
+    "culture",
+    "nature",
+    "beaches",
+    "adventure",
+    "shopping",
+    "nightlife",
+    "relaxation",
+    "history",
+]
+
 
 
 def _normalize_dietary(note: str) -> str:
@@ -796,6 +992,9 @@ def _build_inputs(request: TravelPlanRequest, *, nearby_places: list[str] | None
         "number_of_days": number_of_days,
         "dietary_notes": request.dietary_notes or "none",
         "mobility_notes": request.mobility_notes or "none",
+        "must_see": ", ".join(_must_see_for(request.destination)) or "none",
+        "transport_preference": request.transport_preference or "none stated — decide based on distance, price, and duration",
+        "transit_mode_decision": "not provided — use your own judgment for the main legs",
         "free_text": request.free_text or "",
     }
 
@@ -936,6 +1135,272 @@ def _to_original(usd_amount: float, exchange_rate: float) -> float:
     return round(usd_amount * exchange_rate, 2)
 
 
+# Per-day rates for the overall cab package, by travel style (USD/day).
+_CAB_DAILY_RATE_USD = {"budget": 30.0, "balanced": 50.0, "luxury": 100.0}
+_CAB_VEHICLE_BY_STYLE = {
+    "budget": "AC Hatchback / shared cab",
+    "balanced": "Private AC Sedan with driver",
+    "luxury": "Premium SUV with chauffeur",
+}
+
+# Keywords that tell us an activity belongs to a specific time of day, used to
+# fix LLM-generated schedules that pair e.g. "Sunset Cruise" with a 9 AM slot.
+_EVENING_KEYWORDS = ("sunset", "sun set", "evening", "night", "nightlife", "dinner", "fireworks", "light show", "pub crawl", "clubbing")
+_MORNING_KEYWORDS = ("sunrise", "sun rise", "breakfast", "morning", "early bird", "dawn")
+
+
+def _slot_start_hour(time_slot: Any) -> float | None:
+    """Extract the start hour (24h) from a slot like '09:00 AM - 11:30 AM' or '14:00 - 16:00'."""
+    if not time_slot:
+        return None
+    match = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?", str(time_slot))
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    meridiem = (match.group(3) or "").lower()
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    if meridiem == "am" and hour == 12:
+        hour = 0
+    return hour + minute / 60.0
+
+
+def _fix_activity_time_slots(activities: list) -> list:
+    """Correct slots that mismatch the activity (sunset at 9 AM, lunch at 8 PM...)."""
+    for activity in activities:
+        if not isinstance(activity, dict):
+            continue
+        name = str(activity.get("activity_name") or "").lower()
+        hour = _slot_start_hour(activity.get("time_slot"))
+        if hour is None:
+            continue
+        new_slot = None
+        # Meal keywords win first (a "dinner cruise" belongs at dinner time).
+        if "lunch" in name and (hour < 11 or hour >= 14):
+            new_slot = "12:00 PM - 1:30 PM"
+        elif "breakfast" in name and hour >= 10:
+            new_slot = "08:00 AM - 9:30 AM"
+        elif "dinner" in name and hour < 17:
+            new_slot = "07:00 PM - 8:30 PM"
+        elif any(keyword in name for keyword in _EVENING_KEYWORDS):
+            if hour < 12:
+                new_slot = "05:00 PM - 6:30 PM"
+        elif any(keyword in name for keyword in _MORNING_KEYWORDS):
+            if hour >= 10:
+                new_slot = "07:00 AM - 8:30 AM"
+        if new_slot:
+            activity["time_slot"] = new_slot
+
+    # Keep each day in chronological order after the corrections.
+    def sort_key(activity: Any) -> float:
+        if not isinstance(activity, dict):
+            return 99.0
+        return _slot_start_hour(activity.get("time_slot")) or 99.0
+
+    return sorted(activities, key=sort_key)
+
+
+def _apply_display_pricing(data: dict, travel_style: str) -> dict:
+    """Finalize an itinerary dict for display: hide per-activity prices, fix
+    time slots, swap generic filler for must-see attractions, prefer trains on
+    domestic Indian routes, and attach the overall cab package charge.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    days = data.get("days") or []
+    exchange_rate = float(data.get("exchange_rate") or 1.0) or 1.0
+    currency = str(data.get("currency") or "USD")
+    destination_name = str(data.get("destination") or "")
+
+    # Replace generic filler sightseeing with the destination's famous
+    # attractions when the crews failed to produce real place names — and
+    # relocate attractions that are scheduled in the wrong city.
+    used_attractions: set[str] = set()
+    for day in days:
+        if not isinstance(day, dict):
+            continue
+        region = str(day.get("region") or "")
+        region_key = _must_see_key(region) or _must_see_key(destination_name)
+        must_see = list(_MUST_SEE_ATTRACTIONS[region_key]) if region_key else []
+        if not must_see:
+            continue
+        pool = [a for a in must_see if a not in used_attractions] or must_see
+        cursor = 0
+        for activity in day.get("activities") or []:
+            if not isinstance(activity, dict):
+                continue
+            name = str(activity.get("activity_name") or "").strip().lower()
+            if activity.get("category") != "sightseeing":
+                continue
+            wrong_city = _ATTRACTION_CITY.get(name) is not None and _ATTRACTION_CITY[name] != region_key
+            if (name in _GENERIC_ACTIVITY_NAMES or wrong_city) and pool:
+                chosen = pool[cursor % len(pool)]
+                cursor += 1
+                activity["activity_name"] = chosen
+                activity["location"] = region or destination_name
+                used_attractions.add(chosen)
+
+    # Strip per-activity prices, fix time-slot/activity mismatches, and
+    # recompute day totals without activity costs.
+    for day in days:
+        if not isinstance(day, dict):
+            continue
+        activities = [a for a in (day.get("activities") or []) if isinstance(a, dict)]
+        for activity in activities:
+            activity["estimated_cost"] = None
+            activity["estimated_cost_usd"] = None
+        day["activities"] = _fix_activity_time_slots(activities)
+        day["daily_activity_cost"] = 0.0
+        day["daily_activity_cost_usd"] = 0.0
+        transit_usd = round(sum(float(leg.get("estimated_cost_usd") or 0) for leg in day.get("transit_legs") or [] if isinstance(leg, dict)), 2)
+        stay_usd = round(float((day.get("stay") or {}).get("estimated_cost_usd") or 0), 2)
+        day["daily_transit_cost_usd"] = transit_usd
+        day["daily_transit_cost"] = _to_original(transit_usd, exchange_rate)
+        day["daily_stay_cost_usd"] = stay_usd
+        day["daily_stay_cost"] = _to_original(stay_usd, exchange_rate)
+        total_usd = round(transit_usd + stay_usd, 2)
+        day["total_daily_cost_usd"] = total_usd
+        day["total_daily_cost"] = _to_original(total_usd, exchange_rate)
+
+    # Overall cab package: one charge covering every day of the trip.
+    number_of_days = len(days)
+    cab_rate = _CAB_DAILY_RATE_USD.get(str(travel_style).lower(), _CAB_DAILY_RATE_USD["balanced"])
+    cab_usd = round(cab_rate * number_of_days, 2)
+    base_cost_usd = round(sum(float(day.get("total_daily_cost_usd") or 0) for day in days if isinstance(day, dict)), 2)
+    budget_usd = float(data.get("total_budget_usd") or 0)
+
+    # If the total would blow the budget, shrink the cab package to fit
+    # (keeping at least a token 5%-of-budget charge).
+    if budget_usd > 0 and base_cost_usd + cab_usd > budget_usd:
+        cab_usd = round(max(budget_usd * 0.05, budget_usd - base_cost_usd), 2)
+    # Rounding of individual components can leave the total a few cents over
+    # budget — absorb the excess in the cab charge.
+    if budget_usd > 0 and base_cost_usd + cab_usd > budget_usd and cab_usd > 0:
+        cab_usd = round(max(cab_usd - ((base_cost_usd + cab_usd) - budget_usd), 0.0), 2)
+
+    if number_of_days > 0:
+        data["cab_service"] = {
+            "vehicle_type": _CAB_VEHICLE_BY_STYLE.get(str(travel_style).lower(), _CAB_VEHICLE_BY_STYLE["balanced"]),
+            "coverage": f"Full trip — all {number_of_days} day(s), airport/rail pickup to final drop, all sightseeing transfers",
+            "total_days": number_of_days,
+            "estimated_cost": _to_original(cab_usd, exchange_rate),
+            "estimated_cost_usd": cab_usd,
+            "notes": "Covers daily sightseeing runs and local transfers for the whole group in one vehicle.",
+        }
+
+    actual_usd = round(base_cost_usd + cab_usd, 2)
+    data["actual_calculated_cost_usd"] = actual_usd
+    data["actual_calculated_cost"] = _to_original(actual_usd, exchange_rate)
+
+    inclusions = data.get("inclusions")
+    if isinstance(inclusions, list):
+        cab_line = f"Private cab services for all {number_of_days} days — {_to_original(cab_usd, exchange_rate):,.0f} {currency} total"
+        if cab_line not in inclusions:
+            inclusions.append(cab_line)
+        # Sightseeing/activity pricing is not shown per item.
+        data["inclusions"] = [
+            item for item in inclusions
+            if not (isinstance(item, str) and ("sightseeing" in item.lower() and "estimate" in item.lower()))
+        ]
+
+    # Always tell the traveler how many days the destination actually needs
+    # instead of silently padding the plan with filler days.
+    recommended = _recommended_days_for(destination_name)
+    if recommended:
+        notes = data.get("notes")
+        if not isinstance(notes, list):
+            notes = []
+            data["notes"] = notes
+        rec_line = f"Recommended duration: {recommended}. This plan is built for {number_of_days} day(s) as requested."
+        if rec_line not in notes:
+            notes.append(rec_line)
+
+    return data
+
+
+def _coerce_transit_legs(raw: str, exchange_rate: float) -> list[TransitLeg]:
+    """Parse planner transit legs, filling the display-currency fields agents omit.
+
+    Agents emit estimated_cost_usd only, while TransitLeg also requires
+    estimated_cost — validating the whole list at once used to silently drop
+    every leg and fall back to mock flights. Invalid individual legs are
+    skipped instead of discarding the whole list.
+    """
+    try:
+        items = _extract_json(raw)
+    except Exception:
+        return []
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        return []
+
+    legs: list[TransitLeg] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        leg = dict(item)
+        usd = leg.get("estimated_cost_usd")
+        if usd is None:
+            usd = leg.get("estimated_cost") or 0
+        try:
+            usd = float(usd)
+        except (TypeError, ValueError):
+            usd = 0.0
+        leg["estimated_cost_usd"] = usd
+        original = leg.get("estimated_cost")
+        if original is None:
+            original = _to_original(usd, exchange_rate)
+        leg["estimated_cost"] = float(original)
+        leg["provider"] = str(leg.get("provider") or "")
+        leg["notes"] = str(leg.get("notes") or "")
+        try:
+            legs.append(TransitLeg(**leg))
+        except Exception:
+            continue
+    return legs
+
+
+def _coerce_stay_options(raw: str, exchange_rate: float) -> list[StayOption]:
+    """Parse planner stay options, filling estimated_cost from estimated_cost_usd."""
+    try:
+        items = _extract_json(raw)
+    except Exception:
+        return []
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        return []
+
+    stays: list[StayOption] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        stay = dict(item)
+        usd = stay.get("estimated_cost_usd")
+        if usd is None:
+            usd = stay.get("estimated_cost") or 0
+        try:
+            usd = float(usd)
+        except (TypeError, ValueError):
+            usd = 0.0
+        stay["estimated_cost_usd"] = usd
+        original = stay.get("estimated_cost")
+        if original is None:
+            original = _to_original(usd, exchange_rate)
+        stay["estimated_cost"] = float(original)
+        stay["room_type"] = str(stay.get("room_type") or "Standard")
+        stay["why_this_choice"] = str(stay.get("why_this_choice") or "")
+        stay["booking_notes"] = str(stay.get("booking_notes") or "")
+        try:
+            stays.append(StayOption(**stay))
+        except Exception:
+            continue
+    return stays
+
+
 def _build_itinerary(
     request: TravelPlanRequest,
     draft: DraftItinerary,
@@ -944,6 +1409,7 @@ def _build_itinerary(
     stay_raw: str,
     sightseeing_raw: str,
     search_context: dict[str, str],
+    transit_mode_decision: dict | None = None,
 ) -> MasterTravelItinerary:
     """Assemble the final itinerary from the skeleton, search context, and agent outputs."""
     exchange_rate = getattr(request, "exchange_rate", 1.0) or 1.0
@@ -955,15 +1421,16 @@ def _build_itinerary(
     except Exception:
         parsed = {}
 
-    try:
-        transit_legs = [TransitLeg(**leg) for leg in _extract_json(transit_raw)]
-    except Exception:
-        transit_legs = []
+    transit_legs = _coerce_transit_legs(transit_raw, exchange_rate)
+    stays = _coerce_stay_options(stay_raw, exchange_rate)
 
-    try:
-        stays = [StayOption(**stay) for stay in _extract_json(stay_raw)]
-    except Exception:
-        stays = []
+    # The travel planner sometimes emits unusable pseudo-legs like
+    # "Hotel X -> Return" instead of a real origin-bound leg. Drop them; the
+    # outbound/return legs are synthesized from the mode decision below.
+    transit_legs = [
+        leg for leg in transit_legs
+        if "return" not in f"{leg.from_location} {leg.to_location}".lower()
+    ]
 
     # Consolidate consecutive nights at the same base to a single hotel.
     if stays:
@@ -1001,33 +1468,62 @@ def _build_itinerary(
     # Build a lookup for each skeleton day.
     draft_days = {d.day_number: d for d in draft.days}
 
-    # Default transit if the agent produced nothing; prefer real search context if available.
+    # Main intercity legs come from the Transit Mode Selector agent's decision.
+    # If the travel planner omitted them (or produced nothing), synthesize them
+    # from the decision instead of hardcoding flights.
+    decision = transit_mode_decision if isinstance(transit_mode_decision, dict) else {}
+    main_mode = str(decision.get("mode") or "flight").lower()
+    try:
+        mode_cost_pp = float(decision.get("estimated_cost_usd_per_person"))
+    except (TypeError, ValueError):
+        mode_cost_pp = None
+    try:
+        mode_duration = int(decision.get("duration_minutes"))
+    except (TypeError, ValueError):
+        mode_duration = None
+    mode_provider = str(decision.get("provider_hint") or "Estimated")
+    mode_reasoning = str(decision.get("reasoning") or "")
+
+    def _main_leg(day_number: int, frm: str, to: str, notes: str) -> TransitLeg:
+        per_person = mode_cost_pp if mode_cost_pp else (260.0 if main_mode == "flight" else 15.0)
+        total_usd = per_person * request.travelers
+        duration = mode_duration or (210 if main_mode == "flight" else 300)
+        if main_mode == "flight" and search_context.get("outbound_flight"):
+            provider = "Real flight search (see context)"
+            notes = notes or search_context["outbound_flight"][:300]
+        else:
+            provider = mode_provider
+        return TransitLeg(
+            day_number=day_number,
+            from_location=frm,
+            to_location=to,
+            mode=main_mode,
+            provider=provider,
+            estimated_cost_usd=total_usd,
+            estimated_cost=_to_original(total_usd, exchange_rate),
+            duration_minutes=duration,
+            notes=(notes or mode_reasoning or f"Estimated {main_mode} cost.")[:300],
+        )
+
+    origin_l = request.origin.strip().lower()
+    first_base = draft.days[0].base_location
+    last_base = draft.days[-1].base_location
+    needs_outbound = origin_l not in {request.destination.strip().lower(), first_base.strip().lower()}
+
+    def _places_match(leg: TransitLeg, frm: str, to: str) -> bool:
+        return leg.from_location.strip().lower() == frm.strip().lower() and leg.to_location.strip().lower() == to.strip().lower()
+
+    if needs_outbound and not any(_places_match(leg, request.origin, first_base) for leg in transit_legs):
+        transit_legs.append(
+            _main_leg(1, request.origin, first_base, search_context.get("outbound_flight", ""))
+        )
+    if needs_outbound and not any(_places_match(leg, last_base, request.origin) for leg in transit_legs):
+        transit_legs.append(
+            _main_leg(number_of_days, last_base, request.origin, search_context.get("return_flight", ""))
+        )
+
+    # Default transit if the agent produced nothing at all.
     if not transit_legs:
-        if request.origin.strip().lower() not in {request.destination.strip().lower(), draft.days[0].base_location.strip().lower()}:
-            transit_legs = [
-                TransitLeg(
-                    day_number=1,
-                    from_location=request.origin,
-                    to_location=draft.days[0].base_location,
-                    mode="flight",
-                    provider="Real flight search (see context)" if search_context.get("outbound_flight") else "MockAir",
-                    estimated_cost_usd=260.0 * request.travelers,
-                    estimated_cost=_to_original(260.0 * request.travelers, exchange_rate),
-                    duration_minutes=210,
-                    notes=search_context.get("outbound_flight", "Estimated outbound flight cost.")[:300],
-                ),
-                TransitLeg(
-                    day_number=number_of_days,
-                    from_location=draft.days[-1].base_location,
-                    to_location=request.origin,
-                    mode="flight",
-                    provider="Real flight search (see context)" if search_context.get("return_flight") else "MockAir",
-                    estimated_cost_usd=260.0 * request.travelers,
-                    estimated_cost=_to_original(260.0 * request.travelers, exchange_rate),
-                    duration_minutes=210,
-                    notes=search_context.get("return_flight", "Estimated return flight cost.")[:300],
-                ),
-            ]
         transit_legs.append(
             TransitLeg(
                 day_number=None,
@@ -1199,6 +1695,7 @@ def _build_itinerary(
     )
 
     scaled_data = _scale_itinerary_to_budget(itinerary.model_dump(), request.total_budget_usd, exchange_rate)
+    scaled_data = _apply_display_pricing(scaled_data, request.travel_style)
     return MasterTravelItinerary(**scaled_data)
 
 
@@ -1358,6 +1855,7 @@ async def _assemble_itinerary_with_crew(
     stay_raw: str,
     sightseeing_raw: str,
     search_context: dict[str, str],
+    transit_mode_decision: dict | None = None,
 ) -> MasterTravelItinerary:
     """Run the Itinerary Assembler crew to refine a deterministic baseline itinerary."""
     # Start from a deterministic, schema-correct baseline.
@@ -1369,6 +1867,7 @@ async def _assemble_itinerary_with_crew(
         stay_raw=stay_raw,
         sightseeing_raw=sightseeing_raw,
         search_context=search_context,
+        transit_mode_decision=transit_mode_decision,
     )
 
     inputs = _build_inputs(request)
@@ -1452,6 +1951,16 @@ def _generate_itinerary_pdf(itinerary: MasterTravelItinerary) -> bytes:
     pdf.cell(0, 8, _pdf_text(f"Estimated cost: {symbol}{itinerary.actual_calculated_cost:,.2f} {itinerary.currency}"), ln=True)
     if itinerary.trip_scope:
         pdf.cell(0, 8, _pdf_text(f"Scope: {itinerary.trip_scope}"), ln=True)
+    if itinerary.cab_service:
+        cab = itinerary.cab_service
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Cab Services (overall package)", ln=True)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(0, 6, _pdf_text(f"  Vehicle: {cab.vehicle_type}"), ln=True)
+        pdf.cell(0, 6, _pdf_text(f"  Coverage: {cab.coverage}"), ln=True)
+        pdf.cell(0, 6, _pdf_text(f"  Total for {cab.total_days} day(s): {symbol}{cab.estimated_cost:,.2f} {itinerary.currency}"), ln=True)
+        if cab.notes:
+            pdf.cell(0, 6, _pdf_text(f"  Note: {cab.notes}"), ln=True)
     pdf.ln(5)
 
     if itinerary.inclusions:
@@ -1496,10 +2005,13 @@ def _generate_itinerary_pdf(itinerary: MasterTravelItinerary) -> bytes:
 
         if day.activities:
             pdf.set_font("Helvetica", "B", 10)
-            pdf.cell(0, 6, "Activities:", ln=True)
+            pdf.cell(0, 6, _pdf_text("Activities & sightseeing (entry/meal costs not charged - covered by you on the spot):"), ln=True)
             pdf.set_font("Helvetica", "", 10)
             for activity in day.activities:
-                pdf.cell(0, 6, _pdf_text(f"  {activity.time_slot}: {activity.activity_name} ({activity.location}) - {symbol}{activity.estimated_cost:,.2f}"), ln=True)
+                line = f"  {activity.time_slot}: {activity.activity_name} ({activity.location})"
+                if activity.estimated_cost is not None:
+                    line += f" - {symbol}{activity.estimated_cost:,.2f}"
+                pdf.cell(0, 6, _pdf_text(line), ln=True)
 
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(0, 6, _pdf_text(f"Daily total: {symbol}{day.total_daily_cost:,.2f}"), ln=True)
@@ -1524,7 +2036,7 @@ async def download_itinerary_pdf(session_id: str) -> Response:
     if not itinerary:
         return Response(status_code=404, content="Itinerary not found", media_type="text/plain")
 
-    pdf_bytes = _generate_itinerary_pdf(itinerary)
+    pdf_bytes = await asyncio.to_thread(_generate_itinerary_pdf, itinerary)
     filename = f"{itinerary.destination.lower().replace(' ', '_')}-itinerary.pdf"
     return Response(
         content=pdf_bytes,
@@ -1536,6 +2048,63 @@ async def download_itinerary_pdf(session_id: str) -> Response:
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "service": settings.app_name, "version": settings.app_version}
+
+
+_LLM_EXTRACT_SYSTEM_PROMPT = """You are a precise travel-request information extractor. Extract structured data from the user's trip request and reply with ONLY a JSON object — no prose, no markdown fences.
+
+JSON schema:
+{{
+  "destination": string | null,
+  "origin": string | null,
+  "start_date": "YYYY-MM-DD" | null,
+  "end_date": "YYYY-MM-DD" | null,
+  "travelers": integer | null,
+  "total_budget_original": number | null,
+  "currency": "3-letter ISO code" | null,
+  "total_budget_usd": number | null,
+  "interests": [string] | null,
+  "travel_style": "budget" | "mid-range" | "luxury" | "balanced" | null,
+  "dietary_notes": string | null,
+  "mobility_notes": string | null,
+  "transport_preference": "flight" | "train" | "bus" | null,
+  "cover_nearby": boolean | null
+}}
+
+Rules:
+- Today's date is {today}. Resolve relative dates ("first week of october", "next month", "this weekend") against it, always into the future.
+- If the user states a duration ("for 10 days", "10 day trip"), end_date = start_date + duration - 1. A stated duration wins over vaguer ranges like "first week".
+- "first week of <month>" = the 1st through the 7th.
+- travelers counts EVERYONE including the speaker: "me and my 2 friends" = 3, "a couple" = 2, "my family of 4" = 4.
+- Budgets: total_budget_original is the TOTAL for the whole group. If the budget is per person, multiply by the number of travelers. Understand Indian units: 1 lakh = 100,000 and 1 crore = 10,000,000 (e.g. "2 lakh per person for 3 people" = 600000 INR total). "rs", "₹", "INR", or lakh/crore all mean currency "INR".
+- Convert to total_budget_usd using approximate rates: INR 95, AED 3.67, EUR 0.92, GBP 0.79, SGD 1.34, THB 36, JPY 155, VND 25400 per 1 USD.
+- interests: short activity keywords (beaches, nightlife, food, culture, adventure, shopping, history, nature, museums, temples, mountains, relaxation). If the user wants everything or names none, return null.
+- cover_nearby: true unless the user explicitly wants to stay in one place ("only Goa", "no nearby places", "single destination").
+- transport_preference: ONLY if the user explicitly stated how they want to travel ("by train", "take a flight", "bus is fine"). Otherwise null.
+- Use null for anything the user did not state. Never invent dates, budgets, or locations."""
+
+
+async def _llm_extract_fields(prompt: str) -> dict[str, Any]:
+    """Ask the LLM for fully normalized trip fields (dates, budget, travelers...).
+
+    Returns an empty dict on any failure so the caller falls back to the
+    rule-based parsers.
+    """
+    try:
+        from app.llm import get_chat_llm
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        llm = get_chat_llm()
+        response = await llm.ainvoke(
+            [
+                SystemMessage(content=_LLM_EXTRACT_SYSTEM_PROMPT.format(today=date.today().isoformat())),
+                HumanMessage(content=prompt),
+            ]
+        )
+        data = _extract_json(str(response.content))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("LLM extraction failed; falling back to rule-based parsers. (%s)", exc)
+        return {}
 
 
 @app.post("/parse-prompt", response_model=PromptParseResponse)
@@ -1554,7 +2123,7 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
         "total_budget_usd",
         "interests",
     ]
-    optional_fields = ["travel_style", "cover_nearby", "dietary_notes", "mobility_notes", "free_text", "currency", "total_budget", "exchange_rate"]
+    optional_fields = ["travel_style", "cover_nearby", "dietary_notes", "mobility_notes", "transport_preference", "free_text", "currency", "total_budget", "exchange_rate"]
 
     inputs = {
         "destination": "",
@@ -1599,6 +2168,74 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
 
     if "dietary_notes" in extracted and isinstance(extracted["dietary_notes"], str):
         extracted["dietary_notes"] = _normalize_dietary(extracted["dietary_notes"])
+
+    # The LLM sometimes returns these as lists ("pure veg" -> ["pure veg"]); coerce to strings.
+    for notes_field in ("dietary_notes", "mobility_notes"):
+        if isinstance(extracted.get(notes_field), list):
+            extracted[notes_field] = ", ".join(str(i) for i in extracted[notes_field] if str(i).strip()) or None
+
+    # LLM-based extraction: ask the model to resolve the raw values into final
+    # ones (dates like "first week of october", budgets like "2lakh per person",
+    # stated durations). It fills fields the parse crew missed or returned in
+    # raw text form; it never overrides a clean structured value the crew
+    # already produced (e.g. an explicit traveler count).
+    llm_fields = await _llm_extract_fields(payload.prompt)
+    llm_confirmed: set[str] = set()
+
+    def _is_iso_date(value: Any) -> bool:
+        try:
+            date.fromisoformat(str(value))
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    for field in ("destination", "origin"):
+        value = llm_fields.get(field)
+        if not extracted.get(field) and isinstance(value, str) and value.strip():
+            extracted[field] = value.strip()
+            llm_confirmed.add(field)
+
+    for field in ("start_date", "end_date"):
+        value = llm_fields.get(field)
+        if value and not _is_iso_date(extracted.get(field)):
+            if _is_iso_date(value):
+                extracted[field] = str(value)
+                llm_confirmed.add(field)
+
+    travelers_value = llm_fields.get("travelers")
+    if "travelers" not in extracted and isinstance(travelers_value, (int, float)) and 1 <= int(travelers_value) <= 50:
+        extracted["travelers"] = int(travelers_value)
+        llm_confirmed.add("travelers")
+
+    llm_interests = llm_fields.get("interests")
+    if not extracted.get("interests") and isinstance(llm_interests, list):
+        # Drop non-answers ("none", "everything", ...) so the default-interests
+        # logic downstream fills in the broad set instead.
+        junk_interests = {"none", "nothing", "null", "n/a", "na", "all", "everything", ""}
+        cleaned = [str(i).strip() for i in llm_interests if str(i).strip().lower() not in junk_interests]
+        if cleaned:
+            extracted["interests"] = _normalize_interests(cleaned)
+            llm_confirmed.add("interests")
+
+    llm_budget_usd = llm_fields.get("total_budget_usd")
+    if isinstance(llm_budget_usd, (int, float)) and 10 <= float(llm_budget_usd) <= 1_000_000:
+        extracted["total_budget_usd"] = round(float(llm_budget_usd), 2)
+        llm_confirmed.add("total_budget_usd")
+
+    for field in ("travel_style", "dietary_notes", "mobility_notes", "transport_preference"):
+        value = llm_fields.get(field)
+        if isinstance(value, str) and value.strip():
+            extracted[field] = value.strip()
+            llm_confirmed.add(field)
+    if isinstance(extracted.get("travel_style"), str):
+        extracted["travel_style"] = extracted["travel_style"].lower().replace("midrange", "mid-range")
+
+    llm_cover = llm_fields.get("cover_nearby")
+    if isinstance(llm_cover, bool):
+        extracted["cover_nearby"] = llm_cover
+        llm_confirmed.add("cover_nearby")
+
+    missing = [field for field in required_fields if field not in extracted]
 
     # Normalize dates to YYYY-MM-DD.
     start_text = extracted.get("start_date")
@@ -1658,6 +2295,20 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
             except (ValueError, TypeError):
                 pass
 
+    # A direct "for N days" statement wins over a vaguer range like "first week".
+    if "start_date" in extracted:
+        for_days_match = _FOR_DAYS_RE.search(payload.prompt)
+        if for_days_match:
+            try:
+                start_dt = date.fromisoformat(extracted["start_date"])
+                days = int(for_days_match.group(1))
+                if days > 0:
+                    extracted["end_date"] = (start_dt + timedelta(days=days - 1)).isoformat()
+                    if "end_date" in missing:
+                        missing.remove("end_date")
+            except (ValueError, TypeError):
+                pass
+
     # Fallback: parse the raw prompt for relative date phrases when no dates were extracted.
     if "start_date" not in extracted and "end_date" not in extracted:
         fallback_range = _parse_relative_date_range(payload.prompt)
@@ -1703,18 +2354,57 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
         if fallback_interests:
             extracted["interests"] = fallback_interests
 
+    # Phrases like "cover everything" mean no specific interests — expand to the broad set.
+    if extracted.get("interests"):
+        everything_phrases = {
+            "everything", "cover everything", "covering everything", "all",
+            "anything", "see everything", "do everything", "a bit of everything",
+            "explore everything", "experience everything", "exploring everything",
+            "exploring the country", "explore the country", "variety of activities",
+            "all kinds of activities", "all activities", "general sightseeing",
+        }
+        if all(str(i).lower().strip() in everything_phrases for i in extracted["interests"]):
+            extracted["interests"] = list(_DEFAULT_INTERESTS)
+
+    # When the user doesn't mention specific interests, assume they want a bit of
+    # everything rather than blocking the plan to ask.
+    if not extracted.get("interests"):
+        extracted["interests"] = list(_DEFAULT_INTERESTS)
+
     # Convert budget to USD while preserving the original currency.
-    if "total_budget_usd" in extracted:
+    if "total_budget_usd" in extracted and "total_budget_usd" in llm_confirmed:
+        # The LLM gave the total-group budget. Its USD figure is only an
+        # approximation (it converts with a rounded rate), so when it also
+        # gave the original amount, treat THAT as ground truth and convert
+        # with the live rate — otherwise 8L becomes 7.96L round-tripped.
+        usd_amount = extracted["total_budget_usd"]
+        currency_code = str(llm_fields.get("currency") or "").upper()
+        if len(currency_code) != 3:
+            currency_code = _detect_currency_from_prompt(payload.prompt) or _infer_currency_from_locations(origin_value, destination_value) or "USD"
+        exchange_rate = _fetch_exchange_rates().get(currency_code, _CURRENCY_RATES.get(currency_code.lower(), 1.0))
+        original_amount = llm_fields.get("total_budget_original")
+        if isinstance(original_amount, (int, float)) and float(original_amount) > 0:
+            extracted["total_budget"] = round(float(original_amount), 2)
+            extracted["total_budget_usd"] = round(float(original_amount) / exchange_rate, 2)
+        else:
+            extracted["total_budget_usd"] = usd_amount
+            extracted["total_budget"] = round(usd_amount * exchange_rate, 2)
+        extracted["currency"] = currency_code
+        extracted["exchange_rate"] = exchange_rate
+    elif "total_budget_usd" in extracted:
         raw_budget_value = extracted["total_budget_usd"]
         normalized = _normalize_budget(
             raw_budget_value,
             payload.prompt,
             origin_value,
             destination_value,
+            travelers=int(extracted.get("travelers", 1) or 1),
         )
         if normalized is not None:
             usd_amount, currency_code, exchange_rate = normalized
-            extracted["total_budget"] = round(float(raw_budget_value), 2) if isinstance(raw_budget_value, (int, float)) else round(usd_amount * exchange_rate, 2)
+            # Derive the original-currency amount from the normalized USD value —
+            # the LLM's raw figure can be wrong (e.g. it missed "lakh").
+            extracted["total_budget"] = round(usd_amount * exchange_rate, 2)
             extracted["total_budget_usd"] = usd_amount
             extracted["currency"] = currency_code
             extracted["exchange_rate"] = exchange_rate
@@ -1902,6 +2592,25 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
             "search_context": json.dumps(search_context, indent=2),
         }
 
+        # Phase 3.5: The Transit Mode Selector compares live flight/train/bus
+        # options and decides the main intercity mode; the travel planner must
+        # follow its decision.
+        mode_decision: dict | None = None
+        for attempt in range(2):
+            try:
+                mode_crew = build_transit_mode_crew()
+                mode_result = await mode_crew.kickoff_async(inputs=enriched_inputs)
+                mode_decision_raw = str(mode_result.tasks_output[0]) if mode_result and hasattr(mode_result, "tasks_output") and mode_result.tasks_output else ""
+                parsed_decision = _extract_json(mode_decision_raw) if mode_decision_raw else None
+                if isinstance(parsed_decision, dict) and parsed_decision.get("mode"):
+                    mode_decision = parsed_decision
+                    break
+                logger.warning("Transit mode selector returned no usable decision (attempt %d).", attempt + 1)
+            except Exception as exc:
+                logger.warning("Transit mode selection failed (attempt %d); %s", attempt + 1, exc)
+        if mode_decision:
+            enriched_inputs["transit_mode_decision"] = json.dumps(mode_decision)
+
         # Phase 4: Run specialist crews in parallel.
         travel_crew = build_travel_crew()
         stay_crew = build_stay_crew()
@@ -1928,9 +2637,11 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
             stay_raw=outputs[1],
             sightseeing_raw=outputs[2],
             search_context=search_context,
+            transit_mode_decision=mode_decision if isinstance(mode_decision, dict) else None,
         )
 
         itinerary_store[session_id] = itinerary
+        _persist_stores()
 
         return TravelPlanResponse(
             session_id=session_id,
@@ -1944,6 +2655,238 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
             status="failed",
             error=str(exc),
         )
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _generate_chat_title(prompt: str) -> str:
+    """Create a short title from the user's first message."""
+    words = prompt.split()
+    title = " ".join(words[:8])
+    return title if len(title) <= 50 else title[:47] + "..."
+
+
+_MISSING_FIELD_PHRASES = {
+    "origin": "which city you'll be traveling from",
+    "destination": "your destination",
+    "start_date": "when the trip starts",
+    "end_date": "when the trip ends",
+    "travelers": "how many people are going (including you)",
+    "total_budget_usd": "your total budget for the whole group",
+    "interests": "what you're interested in (e.g. beaches, food, culture, adventure)",
+}
+
+
+def _missing_fields_phrase(missing: list[str]) -> str:
+    """Turn internal field names into a natural-language list of questions."""
+    phrases = [_MISSING_FIELD_PHRASES.get(field, field.replace("_", " ")) for field in missing]
+    if len(phrases) == 1:
+        return phrases[0]
+    return ", ".join(phrases[:-1]) + ", and " + phrases[-1]
+
+
+async def _create_plan_from_prompt(prompt: str) -> TravelPlanResponse:
+    """Parse a free-text prompt and run the full planning pipeline."""
+    # Reuse the parse-prompt logic.
+    parsed = await parse_prompt(PromptParseRequest(prompt=prompt))
+    extracted = parsed.extracted
+
+    required = ["destination", "origin", "start_date", "end_date", "travelers", "total_budget_usd", "interests"]
+    missing = [field for field in required if field not in extracted]
+    if missing:
+        return TravelPlanResponse(
+            session_id="",
+            status="clarifying",
+            error=f"Missing required fields: {', '.join(missing)}",
+        )
+
+    request = TravelPlanRequest(
+        destination=str(extracted.get("destination", "")),
+        origin=str(extracted.get("origin", "")),
+        start_date=date.fromisoformat(str(extracted.get("start_date"))),
+        end_date=date.fromisoformat(str(extracted.get("end_date"))),
+        travelers=int(extracted.get("travelers", 1)),
+        total_budget_usd=float(extracted.get("total_budget_usd", 1)),
+        currency=str(extracted.get("currency", "USD")),
+        total_budget=float(extracted.get("total_budget", extracted.get("total_budget_usd", 1))),
+        exchange_rate=float(extracted.get("exchange_rate", 1)),
+        interests=list(extracted.get("interests", [])),
+        travel_style=str(extracted.get("travel_style", "balanced")),
+        cover_nearby=bool(extracted.get("cover_nearby", True)),
+        dietary_notes=extracted.get("dietary_notes") or None,
+        mobility_notes=extracted.get("mobility_notes") or None,
+        transport_preference=extracted.get("transport_preference") or None,
+        free_text=extracted.get("free_text") or None,
+    )
+
+    return await create_plan(request)
+
+
+@app.post("/chat", response_model=ChatMessageResponse)
+async def create_chat(payload: ChatCreateRequest) -> ChatMessageResponse:
+    """Start a new chat session and generate the first itinerary."""
+    session_id = str(uuid.uuid4())
+
+    plan_response = await _create_plan_from_prompt(payload.message)
+
+    if plan_response.status == "clarifying" or plan_response.itinerary is None:
+        missing_fields = [
+            field.strip() for field in (plan_response.error or "").replace("Missing required fields:", "").split(",")
+            if field.strip()
+        ]
+        details = _missing_fields_phrase(missing_fields) if missing_fields else "a few more details"
+        assistant_message = ChatMessage(
+            role="assistant",
+            content=f"I'd love to plan this trip for you — I just need to know {details}. Could you share that?",
+            type="text",
+            created_at=_now_iso(),
+        )
+        session = ChatSession(
+            id=session_id,
+            title=_generate_chat_title(payload.message),
+            created_at=_now_iso(),
+            updated_at=_now_iso(),
+            messages=[
+                ChatMessage(role="user", content=payload.message, type="text", created_at=_now_iso()),
+                assistant_message,
+            ],
+            current_itinerary=None,
+        )
+        chat_store[session_id] = session
+        _persist_stores()
+        return ChatMessageResponse(session_id=session_id, message=assistant_message, session=session)
+
+    # Store the itinerary both in itinerary_store (for PDF) and chat_store.
+    itinerary_store[session_id] = plan_response.itinerary
+
+    assistant_message = ChatMessage(
+        role="assistant",
+        content="I've created your itinerary. You can now ask follow-up questions like listing other hotels, changing transport, or modifying activities.",
+        type="itinerary_update",
+        payload={"itinerary": plan_response.itinerary.model_dump()},
+        created_at=_now_iso(),
+    )
+
+    session = ChatSession(
+        id=session_id,
+        title=_generate_chat_title(payload.message),
+        created_at=_now_iso(),
+        updated_at=_now_iso(),
+        messages=[
+            ChatMessage(role="user", content=payload.message, type="text", created_at=_now_iso()),
+            assistant_message,
+        ],
+        current_itinerary=plan_response.itinerary,
+    )
+    chat_store[session_id] = session
+    _persist_stores()
+
+    return ChatMessageResponse(session_id=session_id, message=assistant_message, session=session)
+
+
+@app.get("/chat/{session_id}", response_model=ChatSession)
+async def get_chat(session_id: str) -> ChatSession:
+    """Get a chat session by ID."""
+    session = chat_store.get(session_id)
+    if not session:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return session
+
+
+@app.get("/chats", response_model=list[ChatSession])
+async def list_chats() -> list[ChatSession]:
+    """List all chat sessions, newest first."""
+    return sorted(chat_store.values(), key=lambda s: s.updated_at, reverse=True)
+
+
+@app.post("/chat/{session_id}/message", response_model=ChatMessageResponse)
+async def send_chat_message(session_id: str, payload: ChatMessageRequest) -> ChatMessageResponse:
+    """Send a follow-up message to the multi-agent swarm."""
+    session = chat_store.get(session_id)
+    if not session:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    current_itinerary = session.current_itinerary
+
+    # If the first message was clarifying, try to build the plan from the full conversation.
+    if current_itinerary is None:
+        user_messages = [m.content for m in session.messages if m.role == "user"]
+        full_prompt = "\n".join([*user_messages, payload.message])
+        plan_response = await _create_plan_from_prompt(full_prompt)
+
+        if plan_response.status == "completed" and plan_response.itinerary is not None:
+            itinerary_store[session_id] = plan_response.itinerary
+            assistant_message = ChatMessage(
+                role="assistant",
+                content="Perfect! I've created your itinerary. You can now ask follow-up questions.",
+                type="itinerary_update",
+                payload={"itinerary": plan_response.itinerary.model_dump()},
+                created_at=_now_iso(),
+            )
+            session.current_itinerary = plan_response.itinerary
+            session.messages.append(ChatMessage(role="user", content=payload.message, type="text", created_at=_now_iso()))
+            session.messages.append(assistant_message)
+            session.updated_at = _now_iso()
+            _persist_stores()
+            return ChatMessageResponse(session_id=session_id, message=assistant_message, session=session)
+
+        missing_fields = [
+            field.strip() for field in (plan_response.error or "").replace("Missing required fields:", "").split(",")
+            if field.strip()
+        ]
+        details = _missing_fields_phrase(missing_fields) if missing_fields else "a few more details"
+        assistant_message = ChatMessage(
+            role="assistant",
+            content=f"Almost there — I still need to know {details}. Could you share that?",
+            type="text",
+            created_at=_now_iso(),
+        )
+        session.messages.append(ChatMessage(role="user", content=payload.message, type="text", created_at=_now_iso()))
+        session.messages.append(assistant_message)
+        session.updated_at = _now_iso()
+        _persist_stores()
+        return ChatMessageResponse(session_id=session_id, message=assistant_message, session=session)
+
+    blackboard = Blackboard({"current_itinerary": current_itinerary.model_dump()})
+    runner = SwarmRunner(blackboard)
+    # The swarm makes synchronous LLM calls; run it in a thread so the event
+    # loop stays responsive for other requests (e.g. PDF download) meanwhile.
+    result = await asyncio.to_thread(runner.run, payload.message)
+
+    # Update itinerary if the swarm produced a new one.
+    updated_itinerary = result.get("itinerary")
+    if updated_itinerary:
+        try:
+            updated_itinerary = _apply_display_pricing(updated_itinerary, "balanced")
+            current_itinerary = MasterTravelItinerary(**updated_itinerary)
+            session.current_itinerary = current_itinerary
+            itinerary_store[session_id] = current_itinerary
+        except Exception:
+            pass
+
+    message_type = result.get("type", "text")
+    assistant_message = ChatMessage(
+        role="assistant",
+        content=result.get("message", ""),
+        type=message_type,
+        payload={
+            "itinerary": session.current_itinerary.model_dump() if session.current_itinerary else None,
+            "alternatives": result.get("alternatives"),
+            "suggested_actions": result.get("suggested_actions", []),
+        },
+        created_at=_now_iso(),
+    )
+
+    session.messages.append(ChatMessage(role="user", content=payload.message, type="text", created_at=_now_iso()))
+    session.messages.append(assistant_message)
+    session.updated_at = _now_iso()
+    _persist_stores()
+
+    return ChatMessageResponse(session_id=session_id, message=assistant_message, session=session)
 
 
 if __name__ == "__main__":

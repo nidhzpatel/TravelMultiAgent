@@ -134,9 +134,11 @@ export default function DayCard({ day, index, currency = 'USD' }: DayCardProps) 
                     <p className="text-sm text-slate-400">{activity.location}</p>
                     {activity.notes && <p className="mt-1 text-xs text-slate-500">{activity.notes}</p>}
                   </div>
-                  <p className="text-sm font-medium text-emerald-400">
-                    {symbol}{activity.estimated_cost.toLocaleString()}
-                  </p>
+                  {activity.estimated_cost !== null && activity.estimated_cost !== undefined && (
+                    <p className="text-sm font-medium text-emerald-400">
+                      {symbol}{activity.estimated_cost.toLocaleString()}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
@@ -151,7 +153,7 @@ export default function DayCard({ day, index, currency = 'USD' }: DayCardProps) 
         )}
 
         <div className="mt-5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-3">
-          <span className="text-sm text-slate-400">Daily total</span>
+          <span className="text-sm text-slate-400">Daily total (stay + travel)</span>
           <span className="text-lg font-bold text-white">{symbol}{day.total_daily_cost.toLocaleString()}</span>
         </div>
       </div>

@@ -1,7 +1,7 @@
 from crewai import Agent
-from langchain_community.chat_models import ChatOllama
 
 from app.config import get_settings
+from app.llm import get_chat_llm
 from app.crew.tools import (
     distance_clustering_tool,
     flight_search_tool,
@@ -12,12 +12,8 @@ from app.crew.tools import (
 
 settings = get_settings()
 
-# Use a local Ollama model. Ensure the model is pulled: `ollama pull gemma4:26b`
-primary_llm = ChatOllama(
-    base_url=settings.ollama_base_url,
-    model=settings.ollama_model,
-    temperature=0.3,
-)
+# Gemini primary with Ollama fallback (see app/llm.py). If no Gemini key is set, Ollama only.
+primary_llm = get_chat_llm()
 
 
 input_parser_agent = Agent(
@@ -65,6 +61,24 @@ travel_planner_agent = Agent(
     verbose=True,
     allow_delegation=False,
     max_iter=5,
+    tools=[flight_search_tool, ground_transport_tool],
+    llm=primary_llm,
+)
+
+
+transit_mode_selector_agent = Agent(
+    role="Transit Mode Selector",
+    goal="Choose the best transport mode (flight, train, or bus) for the main intercity route and justify it with live prices and durations.",
+    backstory=(
+        "You are a sharp travel economist. You compare flight, train, and bus options for a route "
+        "using real search results: an explicit user preference always wins; otherwise short routes "
+        "favor bus or train, the cheapest reasonable option wins, and when prices are close the "
+        "fastest option wins. You always output a strict JSON decision."
+    ),
+    memory=False,
+    verbose=True,
+    allow_delegation=False,
+    max_iter=10,
     tools=[flight_search_tool, ground_transport_tool],
     llm=primary_llm,
 )

@@ -13,6 +13,7 @@ export interface TravelPlanRequest {
   cover_nearby?: boolean
   dietary_notes?: string
   mobility_notes?: string
+  transport_preference?: string
   free_text?: string
 }
 
@@ -54,6 +55,15 @@ export interface ActivityItem {
   activity_name: string
   location: string
   category: string
+  estimated_cost: number | null
+  estimated_cost_usd: number | null
+  notes: string
+}
+
+export interface CabServiceCharge {
+  vehicle_type: string
+  coverage: string
+  total_days: number
   estimated_cost: number
   estimated_cost_usd: number
   notes: string
@@ -93,6 +103,7 @@ export interface MasterTravelItinerary {
   stay_summary: string
   sightseeing_summary: string
   trip_scope?: string
+  cab_service?: CabServiceCharge | null
   inclusions: string[]
   exclusions: string[]
   notes: string[]
@@ -103,4 +114,39 @@ export interface TravelPlanResponse {
   status: string
   itinerary: MasterTravelItinerary | null
   error: string | null
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  type: 'text' | 'itinerary_update' | 'alternatives'
+  payload?: {
+    itinerary?: MasterTravelItinerary
+    alternatives?: unknown[]
+    suggested_actions?: string[]
+  }
+  created_at?: string
+}
+
+export interface ChatSession {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+  messages: ChatMessage[]
+  current_itinerary: MasterTravelItinerary | null
+}
+
+export interface ChatCreateRequest {
+  message: string
+}
+
+export interface ChatMessageRequest {
+  message: string
+}
+
+export interface ChatMessageResponse {
+  session_id: string
+  message: ChatMessage
+  session: ChatSession
 }

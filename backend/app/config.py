@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3:latest"
 
+    # Gemini is the primary LLM; Ollama is the fallback when Gemini hits rate limits.
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.6-flash"
+
     # External API keys (only Serper is required for search tools)
     serper_api_key: str = ""
 
