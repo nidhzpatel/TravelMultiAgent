@@ -82,3 +82,9 @@ pnpm-debug.log*
 # Misc
 *.pem
 *.key
+
+# Keep repository documentation local-only. The root README is the sole public Markdown file.
+*.md
+!/README.md
+docs/
+doc/
