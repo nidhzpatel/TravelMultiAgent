@@ -58,6 +58,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Reject whitespace errors
-        run: git diff --check HEAD^ HEAD
+        run: git show --check --oneline HEAD
       - name: Confirm public documentation policy
         run: test "$(git ls-tree -r --name-only HEAD | grep -E '\.md$' | wc -l | tr -d ' ')" = 1
