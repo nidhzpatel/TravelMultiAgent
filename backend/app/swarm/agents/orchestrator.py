@@ -74,6 +74,14 @@ class OrchestratorAgent(BaseAgent):
         elif intent == "modify_stay":
             self.send("StayAgent", "modify_stay", {"user_input": user_input, "details": details})
 
+        elif intent == "modify_food":
+            # A new food preference means the stays must be re-planned to match it;
+            # the critic then re-checks meal/food consistency across the plan.
+            self.send("StayAgent", "modify_stay", {"user_input": user_input, "details": details})
+
+        elif intent == "modify_radius":
+            self.send("ItineraryArchitect", "modify_plan", {"user_input": user_input, "details": details})
+
         elif intent == "modify_experience":
             self.send("ExperienceAgent", "modify_experience", {"user_input": user_input, "details": details})
 
@@ -135,7 +143,7 @@ class OrchestratorAgent(BaseAgent):
             return
 
     def _handle_critic_result(self, payload: dict[str, Any]) -> None:
-        valid = payload.get("valid", True)
+        valid = payload.get("valid") is True and isinstance(payload.get("updated_itinerary"), dict)
         issues = payload.get("issues", [])
         updated_itinerary = payload.get("updated_itinerary")
 
@@ -149,7 +157,14 @@ class OrchestratorAgent(BaseAgent):
             )
             return
 
-        # Approved (or we gave up fixing). Accept the plan.
+        if not valid:
+            self.send("Concierge", "present_response", {
+                "type": "text",
+                "message": "I couldn't validate that change. Your previous itinerary is unchanged.",
+            })
+            return
+
+        # Only an explicit approval can replace accepted state.
         self._fix_attempts = 0
 
         # Approved. Store the updated itinerary and tell the concierge to respond.

@@ -1,4 +1,8 @@
 from typing import Any
+import logging
+import uuid
+
+logger = logging.getLogger(__name__)
 
 from app.config import get_settings
 from app.llm import get_chat_llm
@@ -51,6 +55,7 @@ class SwarmRunner:
         )
 
         iterations = 0
+        trace_id = uuid.uuid4().hex
         while iterations < self.MAX_ITERATIONS:
             iterations += 1
 
@@ -58,6 +63,8 @@ class SwarmRunner:
             processed = False
             for agent in self.agents.values():
                 if agent.inbox:
+                    logger.info("swarm_step trace_id=%s iteration=%d agent=%s inbox_count=%d",
+                                trace_id, iterations, agent.name, len(agent.inbox))
                     result = agent.run()
 
                     # If the Concierge has a direct response, return it.
@@ -76,9 +83,7 @@ class SwarmRunner:
                 break
 
         # If the swarm finished without a concierge response, build a fallback.
-        current = self.blackboard.get("current_itinerary")
         return {
             "type": "text",
-            "message": "I've processed your request. Let me know if you need anything else.",
-            "itinerary": current,
+            "message": "I couldn't complete that request. Your previous itinerary is unchanged. Please specify the day and change you want.",
         }

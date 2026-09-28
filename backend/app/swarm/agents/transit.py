@@ -52,7 +52,11 @@ class TransitAgent(BaseAgent):
 
     def _plan_transit_change(self, user_input: str, current: dict[str, Any] | None) -> dict[str, Any]:
         prompt = (
-            "You are a transit expert. The user wants to change transport in their existing itinerary.\n\n"
+            "You are a transit expert. The user wants to change transport in their existing itinerary.\n"
+            "Choose each leg's mode by distance: walk under 2 km; auto/rickshaw/cab for 2–15 km; "
+            "bus/metro/train for 15–300 km; flight only beyond ~300 km or when the user explicitly "
+            "wants one. If a leg runs around mealtime, note a food stop that matches the traveler's "
+            "food preference.\n\n"
             f"User request: {user_input}\n\n"
             f"Current itinerary context: {self._itinerary_context(current)}\n\n"
             "Respond ONLY with a raw JSON object in this exact shape (no markdown, no comments):\n"
@@ -68,7 +72,7 @@ class TransitAgent(BaseAgent):
             '      "provider": "Operator name",\n'
             '      "estimated_cost_usd": 0,\n'
             '      "duration_minutes": 0,\n'
-            '      "notes": "Any useful notes"\n'
+            '      "notes": "distance and why this mode"\n'
             '    }\n'
             '  ]\n'
             '}\n'
@@ -85,7 +89,10 @@ class TransitAgent(BaseAgent):
 
     def _find_transit_alternatives(self, user_input: str, current: dict[str, Any] | None) -> list[dict[str, Any]]:
         prompt = (
-            "You are a transit expert. List alternative transport options for this trip.\n\n"
+            "You are a transit expert. List alternative transport options for this trip. "
+            "Choose modes by distance: walk under 2 km; auto/rickshaw/cab 2–15 km; bus/metro/train "
+            "15–300 km; flight beyond ~300 km. Keep the traveler's food preference in mind for "
+            "longer legs with meal service.\n\n"
             f"User request: {user_input}\n\n"
             f"Current itinerary context: {self._itinerary_context(current)}\n\n"
             "Respond ONLY with a raw JSON array like (no markdown, no comments):\n"
@@ -100,15 +107,7 @@ class TransitAgent(BaseAgent):
         return []
 
     def _itinerary_context(self, current: dict[str, Any] | None) -> str:
-        if not current:
-            return "No existing itinerary."
-        return json.dumps({
-            "destination": current.get("destination"),
-            "origin": current.get("origin"),
-            "currency": current.get("currency"),
-            "transit_summary": current.get("transit_summary"),
-            "travelers": current.get("travelers"),
-        })
+        return self._context(current)
 
     def _extract_json(self, raw: str) -> Any | None:
         if not raw:

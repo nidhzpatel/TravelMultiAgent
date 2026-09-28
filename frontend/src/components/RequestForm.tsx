@@ -18,6 +18,8 @@ export default function RequestForm({ onSubmit, isLoading }: RequestFormProps) {
   const [interests, setInterests] = useState('temples, street food, tech')
   const [travelStyle, setTravelStyle] = useState('balanced')
   const [dietary, setDietary] = useState('')
+  const [radiusKm, setRadiusKm] = useState(300)
+  const [foodPreference, setFoodPreference] = useState('')
   const [mobility, setMobility] = useState('')
   const [freeText, setFreeText] = useState('')
 
@@ -39,6 +41,8 @@ export default function RequestForm({ onSubmit, isLoading }: RequestFormProps) {
         .filter(Boolean),
       travel_style: travelStyle,
       dietary_notes: dietary.trim() || undefined,
+      radius_km: radiusKm,
+      food_preference: foodPreference.trim() || undefined,
       mobility_notes: mobility.trim() || undefined,
       free_text: freeText.trim() || undefined,
     })
@@ -127,6 +131,32 @@ export default function RequestForm({ onSubmit, isLoading }: RequestFormProps) {
         value={dietary}
         onChange={(e) => setDietary(e.target.value)}
       />
+
+      <label htmlFor="radiusKm">Search radius from destination (km)</label>
+      <input
+        id="radiusKm"
+        type="number"
+        min={10}
+        max={2000}
+        value={radiusKm}
+        onChange={(e) => setRadiusKm(Number(e.target.value))}
+      />
+
+      <label htmlFor="foodPreference">Food preference</label>
+      <select
+        id="foodPreference"
+        value={foodPreference}
+        onChange={(e) => setFoodPreference(e.target.value)}
+      >
+        <option value="">No preference</option>
+        <option value="vegetarian">Vegetarian</option>
+        <option value="non-vegetarian">Non-vegetarian</option>
+        <option value="vegan">Vegan</option>
+        <option value="jain">Jain</option>
+        <option value="halal">Halal</option>
+        <option value="kosher">Kosher</option>
+        <option value="gluten-free">Gluten-free</option>
+      </select>
 
       <label htmlFor="mobility">Mobility notes</label>
       <input

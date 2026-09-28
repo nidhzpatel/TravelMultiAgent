@@ -76,7 +76,7 @@ def _persist_stores() -> None:
         }
         STORE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
-        logger.warning("Failed to persist stores: %s", exc)
+        logger.warning("Failed to persist stores: %s", type(exc).__name__)
 
 
 def _load_stores() -> None:
@@ -86,14 +86,13 @@ def _load_stores() -> None:
     try:
         payload = json.loads(STORE_FILE.read_text(encoding="utf-8"))
         for sid, data in payload.get("itineraries", {}).items():
-            data = _apply_display_pricing(data, "balanced")
             itinerary_store[sid] = MasterTravelItinerary(**data)
         for sid, data in payload.get("chats", {}).items():
             chat_store[sid] = ChatSession(**data)
         if chat_store:
             logger.info("Restored %d chat session(s) from %s", len(chat_store), STORE_FILE)
     except Exception as exc:
-        logger.warning("Failed to load persisted stores: %s", exc)
+        logger.warning("Failed to load persisted stores: %s", type(exc).__name__)
 
 
 @asynccontextmanager
@@ -142,6 +141,67 @@ def _extract_json(raw: str) -> Any:
     return json.loads(match.group(0))
 
 
+# Food-preference web searches surface restaurant listicles; these signals mark
+# names that must never be used as hotels (used by the hotel-name extractor and
+# the stay scrubber below).
+_RESTAURANT_NAME_SIGNALS = (
+    "restaurant", "dosa", "cafe", "café", "kitchen", "thali", "bhavan",
+    "bhawan", "eatery", "dhaba", "bakery", "foods", "food", "dining",
+    "tandoor", "biryani", "sweets", "sweet", "chai", "coffee", "mess",
+    "fast food", "cuisine", "grill", "curry", "snacks", "juice", "waltham",
+)
+
+
+def _is_restaurant_name(name: str) -> bool:
+    return any(signal in (name or "").lower() for signal in _RESTAURANT_NAME_SIGNALS)
+
+
+def _scrub_restaurant_stay_names(
+    data: dict[str, Any], bases: list[str], search_context: dict[str, str]
+) -> None:
+    """Replace dining venues misused as hotels with a real accommodation name.
+
+    A stay name is distrusted when (a) it carries restaurant signals, (b) the
+    hotel-search line mentioning it reads like a dining venue, or (c) it does
+    not appear in the dedicated hotel search context at all.
+    """
+    hotel_lines: list[str] = []
+    for key, value in (search_context or {}).items():
+        if str(key).startswith("hotel_"):
+            hotel_lines.extend(str(value).splitlines())
+
+    def _line_is_dining(name_lower: str) -> bool:
+        for line in hotel_lines:
+            if name_lower in line.lower():
+                return any(signal in line.lower() for signal in _RESTAURANT_NAME_SIGNALS)
+        return False
+
+    for day in data.get("days", []) or []:
+        if not isinstance(day, dict):
+            continue
+        stay = day.get("stay")
+        if not isinstance(stay, dict):
+            continue
+        name = str(stay.get("hotel_name") or "")
+        if not name:
+            continue
+        name_lower = name.lower()
+        mentioned = any(name_lower in line.lower() for line in hotel_lines)
+        if mentioned and not _is_restaurant_name(name) and not _line_is_dining(name_lower):
+            continue
+        real_hotel = None
+        for base in bases:
+            real_hotel = _extract_hotel_name_from_context(base, search_context)
+            if real_hotel:
+                break
+        region = str(day.get("region") or "the area")
+        stay["hotel_name"] = real_hotel or f"Hotel in {region}"
+        stay["why_this_choice"] = (
+            f"Replaced '{name}' (a dining venue, not a stay) with a real accommodation "
+            "option; breakfast and dinner included."
+        )
+
+
 def _extract_hotel_name_from_context(base: str, search_context: dict[str, str]) -> str | None:
     """Try to pull a real hotel name from the Serper search context for a base location."""
     context = search_context.get(f"hotel_{base}") or ""
@@ -153,21 +213,38 @@ def _extract_hotel_name_from_context(base: str, search_context: dict[str, str]) 
         "guide", "compare", "downtown hotels", "hotel destinations",
         "find hotels", "book a stay",
     ]
+    # Food-preference searches surface restaurant listicles; never let those
+    # become "hotels". Prefer names that clearly signal accommodation.
+    restaurant_signals = _RESTAURANT_NAME_SIGNALS
+    hotel_signals = (
+        "hotel", "resort", "suites", "suite", "villas", "villa", "lodge",
+        "retreat", "inn", "homestay", "palace", "residency", "stay",
+        "guest house", "regency", "haveli",
+    )
+
+    def _is_restaurant(name: str) -> bool:
+        return any(signal in name.lower() for signal in restaurant_signals)
 
     # Serper snippets often contain numbered lists like "1. Hard Rock Hotel Goa · 2. ...".
     # Extract the first real-looking entry from those lists.
     candidates = re.findall(
-        r"(?:\d+\.\s*|\d+\)\s*|•\s*|\-\s*)([A-Z][A-Za-z0-9&\s'’\-]{2,60}?)(?=\s*[·,;|\n]|$)",
+        r"(?:\d+\.\s*|\d+\)\s*|•\s*|\-\s*)([A-Z][A-Za-z0-9&\s'’\.\-]{2,60}?)(?=\s*[·,;|\n]|$)",
         context,
     )
+    cleaned: list[str] = []
     for candidate in candidates:
         candidate = candidate.strip()
         if len(candidate.split()) < 2:
             continue
         lower = candidate.lower()
-        if any(phrase in lower for phrase in skip_phrases):
+        if any(phrase in lower for phrase in skip_phrases) or _is_restaurant(candidate):
             continue
-        return candidate
+        cleaned.append(candidate)
+    for preferred in (True, False):
+        for candidate in cleaned:
+            has_hotel_signal = any(signal in candidate.lower() for signal in hotel_signals)
+            if has_hotel_signal == preferred:
+                return candidate
 
     # Fallback: use the first non-listicle result title.
     for line in context.splitlines():
@@ -177,7 +254,7 @@ def _extract_hotel_name_from_context(base: str, search_context: dict[str, str]) 
             if not title:
                 continue
             lower = title.lower()
-            if any(phrase in lower for phrase in skip_phrases):
+            if any(phrase in lower for phrase in skip_phrases) or _is_restaurant(title):
                 continue
             return title
     return None
@@ -451,6 +528,27 @@ _RELATIVE_DATE_RE = re.compile(
 )
 
 
+_RADIUS_RE = re.compile(
+    r"(?:within|under|in|inside|of|radius of|range of)\s+(\d{2,4})\s*(km|kilometers?|kms|miles?|mi)\b"
+    r"|\b(\d{2,4})\s*(km|kilometers?|kms|miles?|mi)\s*(?:radius|range|from\s+the\s+destination)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_radius_km(text: str) -> int | None:
+    """Pull a travel-radius statement out of free text and return it in km."""
+    match = _RADIUS_RE.search(text or "")
+    if not match:
+        return None
+    value = int(match.group(1) or match.group(3))
+    unit = (match.group(2) or match.group(4) or "km").lower()
+    if value <= 0:
+        return None
+    if unit.startswith("mi"):
+        value = round(value * 1.609)
+    return max(10, min(2000, value))
+
+
 def _parse_relative_date_range(text: str) -> tuple[str, str] | None:
     """Parse natural-language date phrases into ISO start/end dates."""
     if not text:
@@ -664,25 +762,6 @@ def _clean_place_candidate(text: str) -> str | None:
     return text
 
 
-# Famous attractions per destination. Injected into the sightseeing/assembler
-# crew prompts AND used as a deterministic fallback: generic filler activities
-# are replaced with these names when the crews fail to produce real places.
-_MUST_SEE_ATTRACTIONS: dict[str, list[str]] = {
-    "mt abu": ["Dilwara Temples", "Nakki Lake", "Guru Shikhar", "Sunset Point", "Toad Rock", "Achalgarh Fort", "Peace Park (Brahma Kumaris)", "Trevor's Tank"],
-    "goa": ["Baga Beach", "Fort Aguada", "Basilica of Bom Jesus", "Dudhsagar Falls", "Anjuna Flea Market", "Chapora Fort", "Candolim Beach", "Divar Island"],
-    "udaipur": ["City Palace", "Lake Pichola boat ride", "Jag Mandir", "Saheliyon Ki Bari", "Jagdish Temple", "Sajjangarh Monsoon Palace", "Fateh Sagar Lake"],
-    "jodhpur": ["Mehrangarh Fort", "Jaswant Thada", "Umaid Bhawan Palace", "Clock Tower & Sardar Market", "Mandore Gardens", "Toorji Ka Jhalra"],
-    "jaipur": ["Amber Fort", "Hawa Mahal", "City Palace", "Jantar Mantar", "Nahargarh Fort", "Bapu Bazaar"],
-    "manali": ["Solang Valley", "Hidimba Devi Temple", "Old Manali", "Jogini Waterfall", "Manu Temple", "Nehru Kund"],
-    "dubai": ["Burj Khalifa", "Dubai Fountain Show", "Palm Jumeirah", "Dubai Marina", "Desert Safari", "Dubai Creek & Gold Souk", "Miracle Garden"],
-    "mumbai": ["Gateway of India", "Marine Drive", "Elephanta Caves", "Colaba Causeway", "Siddhivinayak Temple", "Juhu Beach"],
-    "delhi": ["Red Fort", "Qutub Minar", "India Gate", "Humayun's Tomb", "Lotus Temple", "Chandni Chowk"],
-    "bangkok": ["Grand Palace", "Wat Arun", "Wat Pho", "Chatuchak Market", "Chao Phraya cruise", "Jim Thompson House"],
-    "bali": ["Uluwatu Temple", "Tegallalang Rice Terraces", "Ubud Monkey Forest", "Tanah Lot", "Mount Batur", "Tirta Empul"],
-    "paris": ["Eiffel Tower", "Louvre Museum", "Notre-Dame", "Seine River cruise", "Montmartre & Sacré-Cœur", "Arc de Triomphe"],
-    "tokyo": ["Senso-ji Temple", "Meiji Shrine", "Shibuya Crossing", "Tokyo Skytree", "Tsukiji Outer Market", "Shinjuku Gyoen"],
-}
-
 # How many days a destination actually needs (with nearby places), so we can
 # tell the traveler instead of padding the plan with filler.
 _RECOMMENDED_DAYS: dict[str, str] = {
@@ -702,40 +781,11 @@ _RECOMMENDED_DAYS: dict[str, str] = {
 }
 
 # Generic filler activity names produced when the crews lack real data. These
-# get replaced with must-see attractions when possible.
+# get replaced with famous places from the web-derived rankings when possible.
 _GENERIC_ACTIVITY_NAMES = {
     "historic downtown walk", "local neighborhood explore", "famous landmark visit",
     "central museum", "panoramic viewpoint", "scenic park or garden",
     "local food market", "evening food & nightlife",
-}
-
-
-def _must_see_key(place: str) -> str | None:
-    """Return the _MUST_SEE_ATTRACTIONS key that appears in the place name."""
-    if not place:
-        return None
-    lowered = place.lower()
-    # Aliases resolve to the canonical key so cross-city checks compare equal.
-    if "mount abu" in lowered or "mt. abu" in lowered:
-        return "mt abu"
-    for key in _MUST_SEE_ATTRACTIONS:
-        if key in lowered:
-            return key
-    return None
-
-
-def _must_see_for(place: str) -> list[str]:
-    """Return the famous-attraction list whose key appears in the place name."""
-    key = _must_see_key(place)
-    return list(_MUST_SEE_ATTRACTIONS[key]) if key else []
-
-
-# Maps a known attraction name back to its city, so we can detect activities
-# scheduled in the wrong city (e.g., Mehrangarh Fort on a Mt Abu day).
-_ATTRACTION_CITY = {
-    attraction.lower(): city
-    for city, attractions in _MUST_SEE_ATTRACTIONS.items()
-    for attraction in attractions
 }
 
 
@@ -751,12 +801,228 @@ def _recommended_days_for(place: str) -> str | None:
     return None
 
 
-async def _fetch_nearby_places_async(destination: str) -> list[str]:
+# --- Web-driven place discovery & scoring -------------------------------------
+# Place score = rating x review_count, extracted from live web snippets such as
+# "Baga Beach: 4.5 (12,345 reviews)". Snippets that only carry a rating keep it
+# but are flagged "estimated" so agents treat them as unverified.
+
+_RATING_WITH_COUNT_RE = re.compile(
+    r"(?<![/\d.])(\d(?:\.\d)?)\s*(?:/\s*5\s*(?:stars?)?|stars?|★)?\s*[(\[\-–—·]\s*([\d,.]+)\s*(k)?\s*(?:reviews?|ratings?|votes?)",
+    re.IGNORECASE,
+)
+_COUNT_WITH_RATING_RE = re.compile(
+    r"([\d,.]+)\s*(k)?\s*(?:reviews?|ratings?|votes?)\D{0,12}?(?<![/\d.])(\d(?:\.\d)?)\s*(?:/\s*5|stars?|★)?",
+    re.IGNORECASE,
+)
+_BASED_ON_COUNT_RE = re.compile(
+    r"(?<![/\d.])(\d(?:\.\d)?)\s*(?:/\s*5\s*(?:stars?)?|stars?|★)?\s*(?:based on|from|by)\s+([\d,.]+)\s*(k)?\s*(?:reviews?|ratings?|votes?|travelers?|reviewers?|people)",
+    re.IGNORECASE,
+)
+_RATING_ONLY_RE = re.compile(r"(?<![/\d.])(\d(?:\.\d)?)\s*(?:/\s*5\s*(?:stars?)?|stars?|★)", re.IGNORECASE)
+
+_PLACE_TITLE_BLOCKLIST = {
+    "top", "best", "things", "guide", "tips", "places", "visit", "updated",
+    "tripadvisor", "reviews", "photos", "video", "official site",
+}
+
+
+def _parse_review_count(digits: str, k_suffix: str | None) -> int:
+    value = float(digits.replace(",", ""))
+    if k_suffix:
+        value *= 1000
+    return int(value)
+
+
+def _place_name_from_title(title: str) -> str | None:
+    """Best-effort place name from a web-result title segment."""
+    segment = re.split(r"\s+[-–—]\s+|\s+\|\s+", title)[0]
+    segment = re.sub(r"\s*\d{4}.*$", "", segment).strip()
+    if not segment:
+        return None
+    lowered = segment.lower()
+    if any(word == lowered or lowered.startswith(word + " ") for word in _PLACE_TITLE_BLOCKLIST):
+        return None
+    candidate = _clean_place_candidate(segment) or segment
+    words = candidate.split()
+    if not 1 <= len(words) <= 8:
+        return None
+    if not any(w[0].isupper() for w in words if w):
+        return None
+    return candidate
+
+
+def _extract_place_scores(text: str) -> list[dict[str, Any]]:
+    """Extract place candidates with rating/review-count data from web result text."""
+    candidates: list[dict[str, Any]] = []
+    if not text:
+        return candidates
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("- "):
+            continue
+        body = re.sub(r"\s*\(https?://[^)]*\)\s*$", "", line[2:].strip())
+        title, _, _snippet = body.partition(": ")
+        name = _place_name_from_title(title)
+        if not name:
+            continue
+
+        rating: float | None = None
+        count: int | None = None
+        match = _RATING_WITH_COUNT_RE.search(body)
+        if match:
+            rating = float(match.group(1))
+            count = _parse_review_count(match.group(2), match.group(3))
+        else:
+            match = _BASED_ON_COUNT_RE.search(body)
+            if match:
+                rating = float(match.group(1))
+                count = _parse_review_count(match.group(2), match.group(3))
+            else:
+                match = _COUNT_WITH_RATING_RE.search(body)
+                if match:
+                    count = _parse_review_count(match.group(1), match.group(2))
+                    rating = float(match.group(3))
+        if rating is None:
+            match = _RATING_ONLY_RE.search(body)
+            if match:
+                rating = float(match.group(1))
+
+        if rating is None or not 1.0 <= rating <= 5.0:
+            continue
+        candidates.append({
+            "name": name,
+            "rating": rating,
+            "review_count": count,
+            "estimated": count is None,
+        })
+    return candidates
+
+
+def _compute_place_scores(candidates: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    """Rank places by score = rating x review_count; rating-only entries rank below exact ones."""
+    exact = [c for c in candidates if c.get("review_count")]
+    estimated = [c for c in candidates if not c.get("review_count")]
+    for candidate in exact:
+        candidate["score"] = round(candidate["rating"] * candidate["review_count"])
+    exact.sort(key=lambda c: c["score"], reverse=True)
+    estimated.sort(key=lambda c: c["rating"], reverse=True)
+
+    ranked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in exact + estimated:
+        key = candidate["name"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ranked.append({
+            "name": candidate["name"],
+            "rating": candidate["rating"],
+            "review_count": candidate.get("review_count"),
+            "score": candidate.get("score"),
+            "estimated": candidate["estimated"],
+        })
+        if len(ranked) >= limit:
+            break
+    return ranked
+
+
+def _identify_famous_places(destination: str, discovery_text: str) -> list[str]:
+    """Identify iconic landmarks of a destination purely from live web results.
+
+    No hardcoded lists: the famous-places tier is whatever the current web
+    results say is unmissable, so it stays fresh and works for any destination
+    in the world. Returns [] when live search is unavailable.
+    """
+    famous: list[str] = []
+    if not settings.serper_api_key or not discovery_text:
+        return famous
+    try:
+        from app.llm import get_chat_llm
+
+        prompt = (
+            "You identify iconic, unmissable landmarks. From the web results below about "
+            f"{destination}, list ONLY the truly famous/iconic places a first-time visitor "
+            "must see, ignoring ratings and review counts. Return ONLY a raw JSON array of "
+            'strings, e.g. ["Place One", "Place Two"]. No markdown, no comments. If nothing '
+            "is clearly iconic, return [].\n\n" + discovery_text[:4000]
+        )
+        raw = str(get_chat_llm().invoke(prompt).content)
+        data = _extract_json(raw)
+        if isinstance(data, list):
+            existing = {f.lower() for f in famous}
+            for item in data:
+                if isinstance(item, str) and item.strip():
+                    name = _clean_place_candidate(item.strip()) or item.strip()
+                    if name.lower() not in existing:
+                        famous.append(name)
+                        existing.add(name.lower())
+    except Exception:
+        pass
+    return famous[:10]
+
+
+def _famous_places_from_rankings(place_rankings: dict | None) -> list[str]:
+    """Flatten the web-derived famous places across all ranked regions."""
+    famous: list[str] = []
+    for region_data in (place_rankings or {}).values():
+        if not isinstance(region_data, dict):
+            continue
+        for name in region_data.get("famous_places", []) or []:
+            if isinstance(name, str) and name.strip() and name not in famous:
+                famous.append(name)
+    return famous
+
+
+async def _discover_and_rank_places(
+    request: TravelPlanRequest, draft: DraftItinerary
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Run place-discovery + blog searches per region; return rankings and extra context."""
+    from app.crew.tools import blog_research_tool, place_discovery_tool
+
+    regions: list[str] = [request.destination]
+    for day in draft.days:
+        base = (day.base_location or "").strip()
+        if base and base.lower() != request.destination.lower() and base not in regions:
+            regions.append(base)
+
+    interests = request.interests or []
+    tasks: list[Any] = []
+    labels: list[str] = []
+    for region in regions[:4]:
+        tasks.append(place_discovery_tool._arun(region, request.radius_km, interests))
+        labels.append(f"discovery::{region}")
+        tasks.append(blog_research_tool._arun(region, interests, request.food_preference))
+        labels.append(f"blogs::{region}")
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    raw_by_region: dict[str, dict[str, str]] = {}
+    extra_context: dict[str, str] = {}
+    for label, result in zip(labels, results):
+        kind, _, region = label.partition("::")
+        text = "" if isinstance(result, Exception) else str(result)
+        raw_by_region.setdefault(region, {})[kind] = text
+        extra_context[f"{kind}_{region}"] = text or f"No {kind} results for {region}."
+
+    rankings: dict[str, Any] = {}
+    for region, parts in raw_by_region.items():
+        candidates = _extract_place_scores(parts.get("discovery", ""))
+        famous = await asyncio.to_thread(
+            _identify_famous_places, region, parts.get("discovery", "")
+        )
+        rankings[region] = {
+            "top_by_score": _compute_place_scores(candidates, limit=5),
+            "famous_places": famous,
+        }
+    return rankings, extra_context
+
+
+async def _fetch_nearby_places_async(destination: str, radius_km: int = 300) -> list[str]:
     """Fetch nearby day-trip places from Serper for any destination."""
     if not destination or not settings.serper_api_key:
         return []
 
-    query = f"best day trips from {destination}"
+    query = f"best day trips from {destination} within {radius_km} km"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
@@ -986,13 +1252,16 @@ def _build_inputs(request: TravelPlanRequest, *, nearby_places: list[str] | None
         "budget_stay_usd": round(request.total_budget_usd * stay_share, 2),
         "budget_food_usd": round(request.total_budget_usd * food_share, 2),
         "interests": ", ".join(request.interests) if request.interests else "general sightseeing",
+        "radius_km": request.radius_km,
+        "food_preference": request.food_preference or "none",
+        "place_rankings": "{}",
         "travel_style": request.travel_style,
         "cover_nearby": "yes" if request.cover_nearby else "no",
         "nearby_places": ", ".join(nearby_places) if nearby_places else "none",
         "number_of_days": number_of_days,
         "dietary_notes": request.dietary_notes or "none",
         "mobility_notes": request.mobility_notes or "none",
-        "must_see": ", ".join(_must_see_for(request.destination)) or "none",
+        "must_see": "not provided here — use the famous_places from the place rankings (web-derived)",
         "transport_preference": request.transport_preference or "none stated — decide based on distance, price, and duration",
         "transit_mode_decision": "not provided — use your own judgment for the main legs",
         "free_text": request.free_text or "",
@@ -1014,6 +1283,8 @@ def _build_parsed_raw(request: TravelPlanRequest) -> str:
         "total_budget_usd": request.total_budget_usd,
         "currency": getattr(request, "currency", "USD"),
         "interests": request.interests,
+        "radius_km": request.radius_km,
+        "food_preference": request.food_preference,
         "travel_style": request.travel_style,
         "cover_nearby": request.cover_nearby,
         "number_of_days": number_of_days,
@@ -1201,109 +1472,51 @@ def _fix_activity_time_slots(activities: list) -> list:
     return sorted(activities, key=sort_key)
 
 
-def _apply_display_pricing(data: dict, travel_style: str) -> dict:
-    """Finalize an itinerary dict for display: hide per-activity prices, fix
-    time slots, swap generic filler for must-see attractions, prefer trains on
-    domestic Indian routes, and attach the overall cab package charge.
-    """
+def _apply_display_pricing(data: dict, travel_style: str, place_rankings: dict | None = None) -> dict:
+    """Hide activity display prices while preserving USD costs and recomputing totals."""
     if not isinstance(data, dict):
         return data
 
     days = data.get("days") or []
+    number_of_days = len(days)
     exchange_rate = float(data.get("exchange_rate") or 1.0) or 1.0
     currency = str(data.get("currency") or "USD")
     destination_name = str(data.get("destination") or "")
 
-    # Replace generic filler sightseeing with the destination's famous
-    # attractions when the crews failed to produce real place names — and
-    # relocate attractions that are scheduled in the wrong city.
+    # Replace generic filler sightseeing with famous places from the web-derived
+    # rankings when the crews failed to produce real place names.
+    famous_pool: list[str] = list(_famous_places_from_rankings(place_rankings))
     used_attractions: set[str] = set()
-    for day in days:
-        if not isinstance(day, dict):
-            continue
-        region = str(day.get("region") or "")
-        region_key = _must_see_key(region) or _must_see_key(destination_name)
-        must_see = list(_MUST_SEE_ATTRACTIONS[region_key]) if region_key else []
-        if not must_see:
-            continue
-        pool = [a for a in must_see if a not in used_attractions] or must_see
+    if famous_pool:
         cursor = 0
-        for activity in day.get("activities") or []:
-            if not isinstance(activity, dict):
+        for day in days:
+            if not isinstance(day, dict):
                 continue
-            name = str(activity.get("activity_name") or "").strip().lower()
-            if activity.get("category") != "sightseeing":
-                continue
-            wrong_city = _ATTRACTION_CITY.get(name) is not None and _ATTRACTION_CITY[name] != region_key
-            if (name in _GENERIC_ACTIVITY_NAMES or wrong_city) and pool:
-                chosen = pool[cursor % len(pool)]
-                cursor += 1
-                activity["activity_name"] = chosen
-                activity["location"] = region or destination_name
-                used_attractions.add(chosen)
+            region = str(day.get("region") or "")
+            pool = [a for a in famous_pool if a not in used_attractions] or famous_pool
+            for activity in day.get("activities") or []:
+                if not isinstance(activity, dict):
+                    continue
+                name = str(activity.get("activity_name") or "").strip().lower()
+                if activity.get("category") != "sightseeing":
+                    continue
+                if name in _GENERIC_ACTIVITY_NAMES and pool:
+                    chosen = pool[cursor % len(pool)]
+                    cursor += 1
+                    activity["activity_name"] = chosen
+                    activity["location"] = region or destination_name
+                    used_attractions.add(chosen)
 
-    # Strip per-activity prices, fix time-slot/activity mismatches, and
-    # recompute day totals without activity costs.
+    # Presentation must not destroy internal cost evidence or create new charges.
     for day in days:
         if not isinstance(day, dict):
             continue
         activities = [a for a in (day.get("activities") or []) if isinstance(a, dict)]
         for activity in activities:
             activity["estimated_cost"] = None
-            activity["estimated_cost_usd"] = None
         day["activities"] = _fix_activity_time_slots(activities)
-        day["daily_activity_cost"] = 0.0
-        day["daily_activity_cost_usd"] = 0.0
-        transit_usd = round(sum(float(leg.get("estimated_cost_usd") or 0) for leg in day.get("transit_legs") or [] if isinstance(leg, dict)), 2)
-        stay_usd = round(float((day.get("stay") or {}).get("estimated_cost_usd") or 0), 2)
-        day["daily_transit_cost_usd"] = transit_usd
-        day["daily_transit_cost"] = _to_original(transit_usd, exchange_rate)
-        day["daily_stay_cost_usd"] = stay_usd
-        day["daily_stay_cost"] = _to_original(stay_usd, exchange_rate)
-        total_usd = round(transit_usd + stay_usd, 2)
-        day["total_daily_cost_usd"] = total_usd
-        day["total_daily_cost"] = _to_original(total_usd, exchange_rate)
-
-    # Overall cab package: one charge covering every day of the trip.
-    number_of_days = len(days)
-    cab_rate = _CAB_DAILY_RATE_USD.get(str(travel_style).lower(), _CAB_DAILY_RATE_USD["balanced"])
-    cab_usd = round(cab_rate * number_of_days, 2)
-    base_cost_usd = round(sum(float(day.get("total_daily_cost_usd") or 0) for day in days if isinstance(day, dict)), 2)
-    budget_usd = float(data.get("total_budget_usd") or 0)
-
-    # If the total would blow the budget, shrink the cab package to fit
-    # (keeping at least a token 5%-of-budget charge).
-    if budget_usd > 0 and base_cost_usd + cab_usd > budget_usd:
-        cab_usd = round(max(budget_usd * 0.05, budget_usd - base_cost_usd), 2)
-    # Rounding of individual components can leave the total a few cents over
-    # budget — absorb the excess in the cab charge.
-    if budget_usd > 0 and base_cost_usd + cab_usd > budget_usd and cab_usd > 0:
-        cab_usd = round(max(cab_usd - ((base_cost_usd + cab_usd) - budget_usd), 0.0), 2)
-
-    if number_of_days > 0:
-        data["cab_service"] = {
-            "vehicle_type": _CAB_VEHICLE_BY_STYLE.get(str(travel_style).lower(), _CAB_VEHICLE_BY_STYLE["balanced"]),
-            "coverage": f"Full trip — all {number_of_days} day(s), airport/rail pickup to final drop, all sightseeing transfers",
-            "total_days": number_of_days,
-            "estimated_cost": _to_original(cab_usd, exchange_rate),
-            "estimated_cost_usd": cab_usd,
-            "notes": "Covers daily sightseeing runs and local transfers for the whole group in one vehicle.",
-        }
-
-    actual_usd = round(base_cost_usd + cab_usd, 2)
-    data["actual_calculated_cost_usd"] = actual_usd
-    data["actual_calculated_cost"] = _to_original(actual_usd, exchange_rate)
-
-    inclusions = data.get("inclusions")
-    if isinstance(inclusions, list):
-        cab_line = f"Private cab services for all {number_of_days} days — {_to_original(cab_usd, exchange_rate):,.0f} {currency} total"
-        if cab_line not in inclusions:
-            inclusions.append(cab_line)
-        # Sightseeing/activity pricing is not shown per item.
-        data["inclusions"] = [
-            item for item in inclusions
-            if not (isinstance(item, str) and ("sightseeing" in item.lower() and "estimate" in item.lower()))
-        ]
+    from app.accounting import recompute_costs
+    recompute_costs(data)
 
     # Always tell the traveler how many days the destination actually needs
     # instead of silently padding the plan with filler days.
@@ -1410,6 +1623,7 @@ def _build_itinerary(
     sightseeing_raw: str,
     search_context: dict[str, str],
     transit_mode_decision: dict | None = None,
+    place_rankings: dict | None = None,
 ) -> MasterTravelItinerary:
     """Assemble the final itinerary from the skeleton, search context, and agent outputs."""
     exchange_rate = getattr(request, "exchange_rate", 1.0) or 1.0
@@ -1607,10 +1821,9 @@ def _build_itinerary(
         day_activity_cost = sum(a.estimated_cost_usd for a in activities)
         total_activity_cost += day_activity_cost
 
-        # Meals: breakfast + dinner for multi-day trips; lunch optional on heavy activity days.
+        # Meals included in the package: breakfast + dinner at the hotel.
+        # Lunch is always self-paid by the traveler, so it is never listed here.
         meals = ["breakfast", "dinner"]
-        if any(a.category in ("sightseeing", "nature", "adventure") for a in activities):
-            meals.append("lunch")
 
         days.append(
             DayItinerary(
@@ -1644,13 +1857,15 @@ def _build_itinerary(
     inclusions = [
         f"{number_of_days}-day itinerary covering {request.destination}",
         f"Accommodation in {len({s.location for s in stays})} base location(s)",
-        "Daily breakfast and dinner",
+        "Daily breakfast and dinner at the hotel"
+        + (f" ({request.food_preference} options)" if request.food_preference else ""),
         "Sightseeing and local transit estimates",
     ]
     if any(leg.mode == "flight" for leg in transit_legs):
         inclusions.append("Outbound and return flight estimates")
 
     exclusions = [
+        "Lunch (self-paid by the traveler)",
         "Personal expenses, tips, and travel insurance",
         "Activity entrance fees, attraction tickets, and optional experiences",
         "Visa costs and international roaming",
@@ -1684,6 +1899,8 @@ def _build_itinerary(
         currency=currency,
         exchange_rate=exchange_rate,
         travelers=travelers,
+        radius_km=request.radius_km,
+        food_preference=request.food_preference,
         days=days,
         transit_summary=f"Planned {len(transit_legs)} transit legs across {len({leg.from_location for leg in transit_legs})} locations.",
         stay_summary=f"Selected {len(stays)} night(s) in {', '.join(dict.fromkeys(draft.hotel_regions))} matching {request.travel_style} style.",
@@ -1694,8 +1911,10 @@ def _build_itinerary(
         notes=notes,
     )
 
-    scaled_data = _scale_itinerary_to_budget(itinerary.model_dump(), request.total_budget_usd, exchange_rate)
-    scaled_data = _apply_display_pricing(scaled_data, request.travel_style)
+    itinerary_data = itinerary.model_dump()
+    _scrub_restaurant_stay_names(itinerary_data, list(draft.hotel_regions), search_context)
+    scaled_data = _scale_itinerary_to_budget(itinerary_data, request.total_budget_usd, exchange_rate)
+    scaled_data = _apply_display_pricing(scaled_data, request.travel_style, place_rankings)
     return MasterTravelItinerary(**scaled_data)
 
 
@@ -1766,71 +1985,21 @@ def _recompute_display_costs(data: dict, exchange_rate: float) -> dict:
 
 
 def _scale_itinerary_to_budget(data: dict, total_budget_usd: float, exchange_rate: float) -> dict:
-    """Proportionally scale all itemized costs down when the plan exceeds the budget.
-
-    This is a deterministic safety net: agents receive budget caps, but LLMs can
-    still overshoot. Scaling keeps the itinerary structure identical while making
-    the final total fit the user's original currency budget.
-    """
+    """Retain original estimates and disclose the shortfall; never invent discounts."""
     if not isinstance(data, dict) or total_budget_usd <= 0:
         return data
-
     actual_usd = float(data.get("actual_calculated_cost_usd") or 0)
-    if actual_usd <= total_budget_usd:
-        return data
-
-    factor = total_budget_usd / actual_usd
-    currency = data.get("currency", "USD")
-
-    for day in data.get("days", []):
-        if not isinstance(day, dict):
-            continue
-        for leg in day.get("transit_legs", []):
-            leg["estimated_cost_usd"] = round(float(leg.get("estimated_cost_usd", 0) or 0) * factor, 2)
-        stay = day.get("stay")
-        if stay:
-            stay["estimated_cost_usd"] = round(float(stay.get("estimated_cost_usd", 0) or 0) * factor, 2)
-        for activity in day.get("activities", []):
-            activity["estimated_cost_usd"] = round(float(activity.get("estimated_cost_usd", 0) or 0) * factor, 2)
-
-        day["daily_transit_cost_usd"] = round(sum(
-            float(leg.get("estimated_cost_usd", 0) or 0) for leg in day.get("transit_legs", [])
-        ), 2)
-        day["daily_activity_cost_usd"] = round(sum(
-            float(activity.get("estimated_cost_usd", 0) or 0) for activity in day.get("activities", [])
-        ), 2)
-        day["daily_stay_cost_usd"] = round(float(day.get("stay", {}).get("estimated_cost_usd", 0) or 0), 2)
-        day["total_daily_cost_usd"] = round(
-            day["daily_transit_cost_usd"] + day["daily_activity_cost_usd"] + day["daily_stay_cost_usd"], 2
+    if actual_usd > total_budget_usd:
+        note = (
+            f"Estimated cost exceeds your budget by "
+            f"{_to_original(actual_usd - total_budget_usd, exchange_rate):,.2f} "
+            f"{data.get('currency', 'USD')}. Prices have not been reduced; "
+            "change the trip options or budget before booking."
         )
-
-    total_transit = sum(
-        sum(float(leg.get("estimated_cost_usd", 0) or 0) for leg in day.get("transit_legs", []))
-        for day in data.get("days", [])
-    )
-    total_activity = sum(
-        sum(float(activity.get("estimated_cost_usd", 0) or 0) for activity in day.get("activities", []))
-        for day in data.get("days", [])
-    )
-    total_stay = sum(
-        float(day.get("stay", {}).get("estimated_cost_usd", 0) or 0)
-        for day in data.get("days", [])
-    )
-    subtotal = total_transit + total_activity + total_stay
-    contingency = subtotal * 0.10
-    data["actual_calculated_cost_usd"] = round(subtotal + contingency, 2)
-
-    notes = data.get("notes") or []
-    if not isinstance(notes, list):
-        notes = [notes]
-    over_by_original = _to_original(actual_usd - total_budget_usd, exchange_rate)
-    notes.append(
-        f"Costs were scaled by {factor:.0%} to fit your {currency} budget "
-        f"(original estimate was {over_by_original:,.2f} over budget)."
-    )
-    data["notes"] = notes
-
-    return _recompute_display_costs(data, exchange_rate)
+        notes = data.setdefault("notes", [])
+        if note not in notes:
+            notes.append(note)
+    return data
 
 
 def _is_valid_assembler_output(data: dict, request: TravelPlanRequest) -> bool:
@@ -1847,6 +2016,69 @@ def _is_valid_assembler_output(data: dict, request: TravelPlanRequest) -> bool:
     return True
 
 
+# Generic words that must not count as a geographic match on their own.
+_GEO_GENERIC_WORDS = {
+    "beach", "fort", "falls", "lake", "temple", "market", "island", "church",
+    "museum", "garden", "park", "indian", "goa", "visit", "tour", "walk",
+    "explore", "exploration", "day", "trip", "view", "point", "sanctuary",
+    "wildlife", "nature", "waterfall", "palace", "caves", "cave", "hill",
+    "heritage", "old", "new", "local", "food", "lunch", "dinner", "restaurant",
+    "drive", "trail", "quarter", "street", "coastal", "sands",
+}
+
+
+def _itinerary_geography_sane(
+    data: dict,
+    request: TravelPlanRequest,
+    place_rankings: dict | None,
+    search_context: dict[str, str] | None,
+) -> bool:
+    """Reject assembler output whose sightseeing has drifted to the wrong geography.
+
+    The LLM occasionally latches onto off-topic web results (e.g. overseas
+    restaurant listicles) and plans places in another country. Every
+    sightseeing activity should mention something from the destination's
+    web-derived ranked/famous places; otherwise fall back to the deterministic
+    baseline. With no web data at all there is nothing to judge against, so the
+    check passes.
+    """
+    if not isinstance(data, dict):
+        return False
+    allowed: list[str] = []
+    for region_data in (place_rankings or {}).values():
+        if not isinstance(region_data, dict):
+            continue
+        for item in region_data.get("top_by_score", []) or []:
+            if isinstance(item, dict) and item.get("name"):
+                allowed.append(str(item["name"]))
+        allowed.extend(str(p) for p in region_data.get("famous_places", []) or [])
+    blob = " ".join(allowed).lower()
+    if not blob.strip():
+        return True
+
+    total = 0
+    matched = 0
+    for day in data.get("days", []) or []:
+        if not isinstance(day, dict):
+            continue
+        for activity in day.get("activities", []) or []:
+            if not isinstance(activity, dict) or activity.get("category") != "sightseeing":
+                continue
+            name = str(activity.get("activity_name") or "").lower().strip()
+            if not name:
+                continue
+            total += 1
+            words = [
+                w for w in re.findall(r"[a-z]{4,}", name)
+                if w not in _GEO_GENERIC_WORDS
+            ]
+            if name in blob or any(w in blob for w in words):
+                matched += 1
+    if total == 0:
+        return True
+    return (matched / total) >= 0.5
+
+
 async def _assemble_itinerary_with_crew(
     request: TravelPlanRequest,
     draft: DraftItinerary,
@@ -1856,6 +2088,7 @@ async def _assemble_itinerary_with_crew(
     sightseeing_raw: str,
     search_context: dict[str, str],
     transit_mode_decision: dict | None = None,
+    place_rankings: dict | None = None,
 ) -> MasterTravelItinerary:
     """Run the Itinerary Assembler crew to refine a deterministic baseline itinerary."""
     # Start from a deterministic, schema-correct baseline.
@@ -1868,6 +2101,7 @@ async def _assemble_itinerary_with_crew(
         sightseeing_raw=sightseeing_raw,
         search_context=search_context,
         transit_mode_decision=transit_mode_decision,
+        place_rankings=place_rankings,
     )
 
     inputs = _build_inputs(request)
@@ -1875,6 +2109,9 @@ async def _assemble_itinerary_with_crew(
         **inputs,
         "skeleton": draft.model_dump_json(),
         "search_context": json.dumps(search_context, indent=2),
+        "place_rankings": json.dumps(place_rankings or {}, indent=2),
+        # Famous places come from the web-derived rankings, never a hardcoded table.
+        "must_see": ", ".join(_famous_places_from_rankings(place_rankings)) or "none",
         "transit_raw": transit_raw,
         "stay_raw": stay_raw,
         "sightseeing_raw": sightseeing_raw,
@@ -1886,11 +2123,17 @@ async def _assemble_itinerary_with_crew(
         result = await crew.kickoff_async(inputs=enriched_inputs)
         raw_output = str(result.tasks_output[0]) if result and hasattr(result, "tasks_output") and result.tasks_output else "{}"
         data = _extract_json(raw_output)
-        if _is_valid_assembler_output(data, request):
+        if isinstance(data, dict):
+            _scrub_restaurant_stay_names(data, list(draft.hotel_regions), search_context)
+        if _is_valid_assembler_output(data, request) and _itinerary_geography_sane(
+            data, request, place_rankings, search_context
+        ):
             exchange_rate = getattr(request, "exchange_rate", 1.0) or 1.0
             data.setdefault("currency", request.currency)
             data.setdefault("exchange_rate", exchange_rate)
             data = _fill_display_currency(data, exchange_rate)
+            from app.accounting import recompute_costs
+            recompute_costs(data)
             data = _scale_itinerary_to_budget(data, request.total_budget_usd, exchange_rate)
             return MasterTravelItinerary(**data)
     except Exception:
@@ -2063,6 +2306,8 @@ JSON schema:
   "currency": "3-letter ISO code" | null,
   "total_budget_usd": number | null,
   "interests": [string] | null,
+  "radius_km": integer | null,
+  "food_preference": string | null,
   "travel_style": "budget" | "mid-range" | "luxury" | "balanced" | null,
   "dietary_notes": string | null,
   "mobility_notes": string | null,
@@ -2078,6 +2323,8 @@ Rules:
 - Budgets: total_budget_original is the TOTAL for the whole group. If the budget is per person, multiply by the number of travelers. Understand Indian units: 1 lakh = 100,000 and 1 crore = 10,000,000 (e.g. "2 lakh per person for 3 people" = 600000 INR total). "rs", "₹", "INR", or lakh/crore all mean currency "INR".
 - Convert to total_budget_usd using approximate rates: INR 95, AED 3.67, EUR 0.92, GBP 0.79, SGD 1.34, THB 36, JPY 155, VND 25400 per 1 USD.
 - interests: short activity keywords (beaches, nightlife, food, culture, adventure, shopping, history, nature, museums, temples, mountains, relaxation). If the user wants everything or names none, return null.
+- radius_km: ONLY if the user states how far they are willing to travel from the destination ("within 200 km", "under 150km radius", "in a 300 km range"). Convert miles to km (1 mile = 1.609 km). Otherwise null.
+- food_preference: what the traveler eats — vegetarian / veg, non-vegetarian / non-veg, vegan, jain, halal, kosher, gluten-free, or a cuisine style (e.g., "south indian"). ONLY if stated; otherwise null.
 - cover_nearby: true unless the user explicitly wants to stay in one place ("only Goa", "no nearby places", "single destination").
 - transport_preference: ONLY if the user explicitly stated how they want to travel ("by train", "take a flight", "bus is fine"). Otherwise null.
 - Use null for anything the user did not state. Never invent dates, budgets, or locations."""
@@ -2103,7 +2350,7 @@ async def _llm_extract_fields(prompt: str) -> dict[str, Any]:
         data = _extract_json(str(response.content))
         return data if isinstance(data, dict) else {}
     except Exception as exc:
-        logger.warning("LLM extraction failed; falling back to rule-based parsers. (%s)", exc)
+        logger.warning("LLM extraction failed; falling back to rule-based parsers. (%s)", type(exc).__name__)
         return {}
 
 
@@ -2123,7 +2370,7 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
         "total_budget_usd",
         "interests",
     ]
-    optional_fields = ["travel_style", "cover_nearby", "dietary_notes", "mobility_notes", "transport_preference", "free_text", "currency", "total_budget", "exchange_rate"]
+    optional_fields = ["travel_style", "cover_nearby", "dietary_notes", "mobility_notes", "transport_preference", "free_text", "currency", "total_budget", "exchange_rate", "radius_km", "food_preference"]
 
     inputs = {
         "destination": "",
@@ -2168,6 +2415,18 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
 
     if "dietary_notes" in extracted and isinstance(extracted["dietary_notes"], str):
         extracted["dietary_notes"] = _normalize_dietary(extracted["dietary_notes"])
+
+    if "food_preference" in extracted and isinstance(extracted["food_preference"], list):
+        extracted["food_preference"] = ", ".join(str(i) for i in extracted["food_preference"] if str(i).strip()) or None
+    if isinstance(extracted.get("food_preference"), str):
+        extracted["food_preference"] = _normalize_dietary(extracted["food_preference"])
+
+    # Radius: only accept clean integer values from the crew output.
+    radius_value = extracted.get("radius_km")
+    if isinstance(radius_value, str) and radius_value.strip().isdigit():
+        extracted["radius_km"] = int(radius_value.strip())
+    if not isinstance(extracted.get("radius_km"), int) or not 10 <= extracted.get("radius_km", 0) <= 2000:
+        extracted.pop("radius_km", None)
 
     # The LLM sometimes returns these as lists ("pure veg" -> ["pure veg"]); coerce to strings.
     for notes_field in ("dietary_notes", "mobility_notes"):
@@ -2234,6 +2493,25 @@ async def parse_prompt(payload: PromptParseRequest) -> PromptParseResponse:
     if isinstance(llm_cover, bool):
         extracted["cover_nearby"] = llm_cover
         llm_confirmed.add("cover_nearby")
+
+    # Radius: take the LLM value only if the crew/regex didn't already provide one.
+    if "radius_km" not in extracted:
+        llm_radius = llm_fields.get("radius_km")
+        if isinstance(llm_radius, (int, float)) and 10 <= int(llm_radius) <= 2000:
+            extracted["radius_km"] = int(llm_radius)
+            llm_confirmed.add("radius_km")
+    if "radius_km" not in extracted:
+        prompt_radius = _extract_radius_km(payload.prompt)
+        if prompt_radius:
+            extracted["radius_km"] = prompt_radius
+
+    llm_food = llm_fields.get("food_preference")
+    if "food_preference" not in extracted and isinstance(llm_food, str) and llm_food.strip():
+        extracted["food_preference"] = _normalize_dietary(llm_food.strip())
+        llm_confirmed.add("food_preference")
+    # A stated food preference doubles as a dietary note when no separate note exists.
+    if extracted.get("food_preference") and not extracted.get("dietary_notes"):
+        extracted["dietary_notes"] = extracted["food_preference"]
 
     missing = [field for field in required_fields if field not in extracted]
 
@@ -2544,9 +2822,9 @@ async def _run_search_tools(request: TravelPlanRequest, draft: DraftItinerary) -
         search_tasks.append(flight_search_tool._arun(last_base, request.origin, end, None, request.travelers, request.travel_style))
         labels.append("return_flight")
 
-    # Hotels per base region.
+    # Hotels per base region (food-aware: cater to the traveler's food preference).
     for base, check_in, check_out in hotel_groups:
-        search_tasks.append(hotel_search_tool._arun(base, check_in, check_out, request.travelers, request.travel_style))
+        search_tasks.append(hotel_search_tool._arun(base, check_in, check_out, request.travelers, request.travel_style, None, request.food_preference, True))
         labels.append(f"hotel_{base}")
 
     # Attractions per distinct region/day theme.
@@ -2574,7 +2852,7 @@ async def _run_search_tools(request: TravelPlanRequest, draft: DraftItinerary) -
 async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
     session_id = str(uuid.uuid4())
 
-    nearby_places = await _fetch_nearby_places_async(plan_request.destination) if plan_request.cover_nearby else []
+    nearby_places = await _fetch_nearby_places_async(plan_request.destination, plan_request.radius_km) if plan_request.cover_nearby else []
     inputs = _build_inputs(plan_request, nearby_places=nearby_places)
     parsed_raw = _build_parsed_raw(plan_request)
 
@@ -2585,11 +2863,19 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
         # Phase 2: Parallel Serper searches per skeleton segment.
         search_context = await _run_search_tools(plan_request, draft)
 
+        # Phase 2.5: Web-driven place discovery — score places (rating x review
+        # count) and identify iconic landmarks within the travel radius.
+        place_rankings, discovery_context = await _discover_and_rank_places(plan_request, draft)
+        search_context.update(discovery_context)
+
         # Phase 3: Enrich inputs with skeleton + search context for specialists.
         enriched_inputs = {
             **inputs,
             "skeleton": draft.model_dump_json(),
             "search_context": json.dumps(search_context, indent=2),
+            "place_rankings": json.dumps(place_rankings, indent=2),
+            # Famous places come from the web-derived rankings, never a hardcoded table.
+            "must_see": ", ".join(_famous_places_from_rankings(place_rankings)) or "none",
         }
 
         # Phase 3.5: The Transit Mode Selector compares live flight/train/bus
@@ -2607,7 +2893,7 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
                     break
                 logger.warning("Transit mode selector returned no usable decision (attempt %d).", attempt + 1)
             except Exception as exc:
-                logger.warning("Transit mode selection failed (attempt %d); %s", attempt + 1, exc)
+                logger.warning("Transit mode selection failed (attempt %d); %s", attempt + 1, type(exc).__name__)
         if mode_decision:
             enriched_inputs["transit_mode_decision"] = json.dumps(mode_decision)
 
@@ -2638,6 +2924,7 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
             sightseeing_raw=outputs[2],
             search_context=search_context,
             transit_mode_decision=mode_decision if isinstance(mode_decision, dict) else None,
+            place_rankings=place_rankings,
         )
 
         itinerary_store[session_id] = itinerary
@@ -2653,7 +2940,7 @@ async def create_plan(plan_request: TravelPlanRequest) -> TravelPlanResponse:
         return TravelPlanResponse(
             session_id=session_id,
             status="failed",
-            error=str(exc),
+            error="Planning failed because a required service or response was unavailable. Please try again.",
         )
 
 
@@ -2713,6 +3000,8 @@ async def _create_plan_from_prompt(prompt: str) -> TravelPlanResponse:
         total_budget=float(extracted.get("total_budget", extracted.get("total_budget_usd", 1))),
         exchange_rate=float(extracted.get("exchange_rate", 1)),
         interests=list(extracted.get("interests", [])),
+        radius_km=int(extracted.get("radius_km", 300)),
+        food_preference=extracted.get("food_preference") or None,
         travel_style=str(extracted.get("travel_style", "balanced")),
         cover_nearby=bool(extracted.get("cover_nearby", True)),
         dietary_notes=extracted.get("dietary_notes") or None,
@@ -2851,7 +3140,13 @@ async def send_chat_message(session_id: str, payload: ChatMessageRequest) -> Cha
         _persist_stores()
         return ChatMessageResponse(session_id=session_id, message=assistant_message, session=session)
 
-    blackboard = Blackboard({"current_itinerary": current_itinerary.model_dump()})
+    blackboard = Blackboard({
+        "current_itinerary": current_itinerary.model_dump(),
+        "conversation": [
+            {"role": m.role, "content": m.content[:2000]}
+            for m in session.messages[-6:]
+        ],
+    })
     runner = SwarmRunner(blackboard)
     # The swarm makes synchronous LLM calls; run it in a thread so the event
     # loop stays responsive for other requests (e.g. PDF download) meanwhile.
@@ -2861,12 +3156,15 @@ async def send_chat_message(session_id: str, payload: ChatMessageRequest) -> Cha
     updated_itinerary = result.get("itinerary")
     if updated_itinerary:
         try:
-            updated_itinerary = _apply_display_pricing(updated_itinerary, "balanced")
+            from app.accounting import recompute_costs
+            recompute_costs(updated_itinerary)
             current_itinerary = MasterTravelItinerary(**updated_itinerary)
             session.current_itinerary = current_itinerary
             itinerary_store[session_id] = current_itinerary
-        except Exception:
-            pass
+        except Exception as exc:
+            # Keep the previous plan, but make the silent failure visible.
+            logger.warning("Swarm candidate rejected: %s", type(exc).__name__)
+            result = {"type": "text", "message": "I couldn't validate that change. Your previous itinerary is unchanged."}
 
     message_type = result.get("type", "text")
     assistant_message = ChatMessage(

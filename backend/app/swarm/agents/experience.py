@@ -52,7 +52,12 @@ class ExperienceAgent(BaseAgent):
 
     def _plan_experience_change(self, user_input: str, current: dict[str, Any] | None) -> dict[str, Any]:
         prompt = (
-            "You are a local experiences expert. The user wants to change activities in their existing itinerary.\n\n"
+            "You are a local experiences expert. The user wants to change activities in their existing itinerary.\n"
+            "Rules: keep the trip's famous/iconic places and top-rated places in the plan unless the user "
+            "explicitly asks to drop one; every activity must stay within the day's region and the travel "
+            "radius; food activities are lunch only (breakfast and dinner are included at the hotel) and "
+            "must match the traveler's food preference; activity costs cover lunch or local cabs only, "
+            "never entrance fees.\n\n"
             f"User request: {user_input}\n\n"
             f"Current itinerary context: {self._itinerary_context(current)}\n\n"
             "Respond ONLY with a raw JSON object in this exact shape (no markdown, no comments):\n"
@@ -82,7 +87,9 @@ class ExperienceAgent(BaseAgent):
 
     def _find_experience_alternatives(self, user_input: str, current: dict[str, Any] | None) -> list[dict[str, Any]]:
         prompt = (
-            "You are a local experiences expert. List alternative activities or restaurants for this trip.\n\n"
+            "You are a local experiences expert. List alternative activities or restaurants for this trip. "
+            "Restaurants must match the traveler's food preference; everything must lie within the day's "
+            "region and the travel radius.\n\n"
             f"User request: {user_input}\n\n"
             f"Current itinerary context: {self._itinerary_context(current)}\n\n"
             "Respond ONLY with a raw JSON array like (no markdown, no comments):\n"
@@ -97,22 +104,7 @@ class ExperienceAgent(BaseAgent):
         return []
 
     def _itinerary_context(self, current: dict[str, Any] | None) -> str:
-        if not current:
-            return "No existing itinerary."
-        return json.dumps({
-            "destination": current.get("destination"),
-            "origin": current.get("origin"),
-            "currency": current.get("currency"),
-            "days": [
-                {
-                    "day_number": d.get("day_number"),
-                    "theme": d.get("theme"),
-                    "region": d.get("region"),
-                }
-                for d in current.get("days", [])
-            ],
-            "sightseeing_summary": current.get("sightseeing_summary"),
-        })
+        return self._context(current)
 
     def _extract_json(self, raw: str) -> Any | None:
         if not raw:

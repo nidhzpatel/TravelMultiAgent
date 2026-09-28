@@ -18,6 +18,10 @@ class ConciergeAgent(BaseAgent):
     _MODIFY_STAY_KEYWORDS = [
         "hotel", "stay", "accommodation", "room", "resort", "guest house", "hostel",
     ]
+    _MODIFY_FOOD_KEYWORDS = [
+        "food preference", "vegetarian", " non-veg", "nonveg", "vegan", "jain",
+        "halal", "kosher", "gluten-free", "gluten free", "pure veg",
+    ]
     _MODIFY_EXPERIENCE_KEYWORDS = [
         "activity", "activities", "sightseeing", "museum", "beach", "temple", "restaurant",
         "food", "shopping", "replace", "change day", "add day", "remove day",
@@ -81,6 +85,12 @@ class ConciergeAgent(BaseAgent):
     def _keyword_classify(self, user_input: str) -> dict[str, Any] | None:
         text_lower = user_input.lower()
 
+        # Nouns identify a subject, not permission to mutate a trip.
+        asks_question = bool(re.match(r"\s*(when|where|what|why|how|is|are|does|do|can you tell|tell me|explain)\b", text_lower))
+        explicit_edit = bool(re.search(r"\b(change|replace|switch|remove|add|make|update|shrink|increase|reduce)\b", text_lower))
+        if asks_question and not explicit_edit:
+            return {"type": "question", "intent": "general_follow_up", "details": {}}
+
         # Alternatives are usually explicit list/show requests.
         if any(kw in text_lower for kw in self._ALTERNATIVES_KEYWORDS):
             category = "hotel"
@@ -93,6 +103,25 @@ class ConciergeAgent(BaseAgent):
                 "intent": "list_alternatives",
                 "details": {"category": category, "criteria": user_input},
             }
+
+        # Radius changes: "shrink the radius to 150 km", "only within 100 km", ...
+        if "radius" in text_lower or re.search(r"\bwithin \d+\s*(km|kilometer|mile)", text_lower):
+            return {
+                "type": "modify_itinerary",
+                "intent": "modify_radius",
+                "details": {"what_to_change": "radius", "criteria": user_input},
+            }
+
+        # Food preference changes: "make it vegetarian", "we eat jain food", ...
+        if any(kw in text_lower for kw in self._MODIFY_FOOD_KEYWORDS):
+            return {
+                "type": "modify_itinerary",
+                "intent": "modify_food",
+                "details": {"what_to_change": "food", "criteria": user_input},
+            }
+
+        if not explicit_edit:
+            return None
 
         # Modification requests.
         if any(kw in text_lower for kw in self._MODIFY_TRANSIT_KEYWORDS):
@@ -123,13 +152,15 @@ class ConciergeAgent(BaseAgent):
         raw = self._llm_invoke(prompt)
 
         parsed = self._extract_json(raw)
-        if parsed is not None:
+        allowed_intents = {"modify_transit", "modify_stay", "modify_experience", "modify_radius", "modify_food", "list_alternatives", "new_plan"}
+        if isinstance(parsed, dict) and parsed.get("type") in {"modify_itinerary", "list_alternatives", "new_plan"} and parsed.get("intent") in allowed_intents and isinstance(parsed.get("details", {}), dict):
             return parsed
 
         # Fallback: treat as a general question.
         return {
-            "type": "direct_answer",
-            "answer": raw or "I'm not sure how to help with that. Could you rephrase?",
+            "type": "question",
+            "intent": "general_follow_up",
+            "details": {},
         }
 
     def _extract_json(self, raw: str) -> dict[str, Any] | None:
@@ -161,9 +192,12 @@ class ConciergeAgent(BaseAgent):
             f"User message: {user_input}\n\n"
             "Choose exactly one of these types:\n"
             "- direct_answer: general travel question that does NOT require changing the itinerary.\n"
-            "- modify_itinerary: user wants to change transport, stay, days, or activities.\n"
+            "- modify_itinerary: user wants to change transport, stay, days, activities, "
+            "the travel radius, or the food preference.\n"
             "- list_alternatives: user wants to see other hotels, flights, or activities.\n"
             "- new_plan: user wants to plan a completely new trip.\n\n"
+            "For modify_itinerary, set intent to one of: modify_transit, modify_stay, "
+            "modify_experience, modify_radius, modify_food.\n\n"
             "Output ONLY this JSON shape (no markdown, no comments):\n"
             '{\n'
             '  "type": "modify_itinerary",\n'

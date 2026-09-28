@@ -1,0 +1,142 @@
+{
+  "mode": "offline scripted regression; not live answer-quality scoring",
+  "cases": [
+    {
+      "case": "test_answer_quality.QualityTests.test_alternatives_still_route",
+      "passed": true,
+      "latency_ms": 0.02,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_budget_does_not_discount_prices",
+      "passed": false,
+      "latency_ms": 1782.191,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 135, in test_budget_does_not_discount_prices\n    _scale_itinerary_to_budget(data, 10, 80)\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/app/main.py\", line 2077, in _scale_itinerary_to_budget\n    day[\"daily_stay_cost_usd\"] = round(float(day.get(\"stay\", {}).get(\"estimated_cost_usd\", 0) or 0), 2)\n                                             ^^^^^^^^^^^^^^^^^^^^^^^\nAttributeError: 'NoneType' object has no attribute 'get'\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_critic_rejects_false_without_issues",
+      "passed": false,
+      "latency_ms": 0.129,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 89, in test_critic_rejects_false_without_issues\n    self.assertIs(agent.outbox[0].payload[\"valid\"], False)\nAssertionError: True is not False\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_critic_rejects_malformed_output",
+      "passed": false,
+      "latency_ms": 0.073,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 84, in test_critic_rejects_malformed_output\n    self.assertIs(agent.outbox[0].payload[\"valid\"], False)\nAssertionError: True is not False\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_critic_rejects_string_boolean",
+      "passed": false,
+      "latency_ms": 0.058,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 94, in test_critic_rejects_string_boolean\n    self.assertIs(agent.outbox[0].payload[\"valid\"], False)\nAssertionError: True is not False\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_display_retains_internal_activity_cost",
+      "passed": false,
+      "latency_ms": 0.181,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 128, in test_display_retains_internal_activity_cost\n    self.assertEqual(data[\"days\"][0][\"activities\"][0][\"estimated_cost_usd\"], 10)\nAssertionError: None != 10\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_explicit_edit_still_routes",
+      "passed": true,
+      "latency_ms": 0.049,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_failed_repairs_preserve_original",
+      "passed": false,
+      "latency_ms": 0.749,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 105, in test_failed_repairs_preserve_original\n    self.assertEqual(board.get(\"current_itinerary\"), original)\nAssertionError: {'destination': 'Wrong destination', 'origin': 'Ahmedabad'[1704 chars]30}]} != {'destination': 'Goa', 'origin': 'Ahmedabad', 'currency': [1690 chars]30}]}\nDiff is 3034 characters long. Set self.maxDiff to None to see it.\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_flight_question_is_read_only",
+      "passed": false,
+      "latency_ms": 0.04,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 52, in test_flight_question_is_read_only\n    self.assertFalse(result and result.get(\"intent\", \"\").startswith(\"modify\"))\nAssertionError: True is not false\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_hotel_question_is_read_only",
+      "passed": false,
+      "latency_ms": 0.035,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 56, in test_hotel_question_is_read_only\n    self.assertFalse(result and result.get(\"intent\", \"\").startswith(\"modify\"))\nAssertionError: True is not false\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_invalid_classifier_shape_does_not_crash",
+      "passed": false,
+      "latency_ms": 0.149,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 117, in test_invalid_classifier_shape_does_not_crash\n    agent.run()\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/app/swarm/agents/concierge.py\", line 67, in run\n    if classification[\"type\"] == \"direct_answer\":\n       ~~~~~~~~~~~~~~^^^^^^^^\nTypeError: list indices must be integers or slices, not str\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_research_receives_itinerary",
+      "passed": false,
+      "latency_ms": 0.079,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 111, in test_research_receives_itinerary\n    self.assertIn(\"Ahmedabad\", str(llm.prompts[0]))\nAssertionError: 'Ahmedabad' not found in \"You are a knowledgeable travel assistant. Answer the user's question in plain natural language, drawing on travel blogs, reviews, and recommendations where you know them \u2014 mention concrete quality signals (what a place is famous for, best time to visit, review highlights) when they help. Do not invent specific prices, ratings, or schedules; if you don't know, say so honestly.\\n\\nUser question: What transport is planned?\\n\\nRespond in 1-3 sentences. Do not use JSON or bullet points.\"\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_transit_currency",
+      "passed": false,
+      "latency_ms": 0.114,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 79, in test_transit_currency\n    self.assertEqual(data[\"days\"][0][\"transit_legs\"][0][\"estimated_cost\"], 960)\nAssertionError: 12.0 != 960\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_transit_edit_preserves_other_days",
+      "passed": false,
+      "latency_ms": 0.269,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 72, in test_transit_edit_preserves_other_days\n    self.assertEqual(data[\"days\"][1], original)\nAssertionError: {'day[445 chars]1600}, {'day_number': 1, 'from_location': 'A',[381 chars]: 30} != {'day[445 chars]1600}], 'stay': None, 'daily_transit_cost': 16[189 chars]: 30}\nDiff is 1394 characters long. Set self.maxDiff to None to see it.\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_unsupported_radius_reports_failure",
+      "passed": false,
+      "latency_ms": 0.288,
+      "failure": "Traceback (most recent call last):\n  File \"/Users/nidhirajkotiya/Projects/TravelMultiAgent/backend/tests/test_answer_quality.py\", line 122, in test_unsupported_radius_reports_failure\n    self.assertNotIn(\"I've processed your request\", result[\"message\"])\nAssertionError: \"I've processed your request\" unexpectedly found in \"I've processed your request. Let me know if you need anything else.\"\n",
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    }
+  ],
+  "passed": 2,
+  "total": 15
+}

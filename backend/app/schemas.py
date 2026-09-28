@@ -14,6 +14,8 @@ class TravelPlanRequest(BaseModel):
     total_budget: float = Field(0, description="Original currency budget amount for display")
     exchange_rate: float = Field(1.0, description="Original currency units per 1 USD")
     interests: List[str] = Field(default_factory=list, description="Travel interest tags")
+    radius_km: int = Field(300, ge=10, le=2000, description="All visited places must lie within this radius of the destination (km)")
+    food_preference: Optional[str] = Field(None, description="Food the traveler eats: vegetarian, non-vegetarian, vegan, jain, halal, kosher, gluten-free, or cuisine style")
     travel_style: str = Field("balanced", description="budget | balanced | luxury")
     cover_nearby: Optional[bool] = Field(True, description="Whether to include nearby places/day trips when days allow")
     dietary_notes: Optional[str] = Field(None, description="Dietary restrictions or preferences")
@@ -126,6 +128,8 @@ class MasterTravelItinerary(BaseModel):
     currency: str = "USD"
     exchange_rate: float = 1.0
     travelers: int
+    radius_km: Optional[int] = Field(None, description="Travel radius from the destination used for planning (km)")
+    food_preference: Optional[str] = Field(None, description="Food preference the stays and meals were planned around")
     days: List[DayItinerary]
     transit_summary: str
     stay_summary: str

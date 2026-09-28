@@ -2,7 +2,7 @@ import os
 from typing import List, Type
 from datetime import date
 from pydantic import BaseModel, Field
-from crewai_tools import BaseTool
+from langchain_core.tools import BaseTool
 import httpx
 
 from app.config import get_settings
@@ -170,6 +170,8 @@ class GroundTransportTool(BaseTool):
         return (
             f"{from_location} → {to_location} on {date}: {mode}, "
             f"${price:.2f} total, ~{duration} minutes."
+            " Mode guide by distance: walk under 2 km; auto/rickshaw/cab 2–15 km; "
+            "bus/metro/train 15–300 km; flight only beyond ~300 km or when the user prefers it."
         )
 
     async def _arun(
@@ -180,6 +182,10 @@ class GroundTransportTool(BaseTool):
         travelers: int = 1,
         prefer_cheapest: bool = True,
     ) -> str:
+        query = f"{from_location} to {to_location} distance train bus taxi"
+        data = await _serper_search_async(query)
+        if data:
+            return _format_serper_results(data, query)
         return self._run(from_location, to_location, date, travelers, prefer_cheapest)
 
 
@@ -190,6 +196,8 @@ class HotelSearchInput(BaseModel):
     travelers: int = 1
     travel_style: str = "balanced"
     neighborhood: str | None = None
+    food_preference: str | None = Field(None, description="Diet the hotel must cater to (veg, non-veg, vegan, jain, halal, ...)")
+    meals_included: bool = Field(True, description="Whether breakfast and dinner must be included in the rate")
 
 
 class HotelSearchTool(BaseTool):
@@ -205,6 +213,8 @@ class HotelSearchTool(BaseTool):
         travelers: int = 1,
         travel_style: str = "balanced",
         neighborhood: str | None = None,
+        food_preference: str | None = None,
+        meals_included: bool = True,
     ) -> str:
         area = neighborhood or "city center"
         query = f"best hotels in {destination} {area} {travel_style} 2026"
@@ -212,10 +222,16 @@ class HotelSearchTool(BaseTool):
         if data:
             return _format_serper_results(data, query)
         nightly = 60 if travel_style == "budget" else (220 if travel_style == "luxury" else 120)
+        meal_note = ""
+        if meals_included:
+            meals = f"{food_preference} " if food_preference else ""
+            meal_note = f" Breakfast and dinner ({meals.strip()}food) included in the rate; lunch is on your own."
+        food_note = f" Must cater to {food_preference} food." if food_preference else ""
         return (
             f"Stay in {destination} ({area}): MockHotel Plus, {travel_style} room, "
             f"${nightly:.2f}/night from {check_in} to {check_out}. "
             f"Total for stay: ${nightly:.2f} × nights × {travelers} traveler(s). "
+            f"{meal_note}{food_note} "
             f"Book: https://mock-hotels.example/book"
         )
 
@@ -227,13 +243,20 @@ class HotelSearchTool(BaseTool):
         travelers: int = 1,
         travel_style: str = "balanced",
         neighborhood: str | None = None,
+        food_preference: str | None = None,
+        meals_included: bool = True,
     ) -> str:
         area = neighborhood or "city center"
         query = f"best hotels in {destination} {area} {travel_style} 2026"
+        if food_preference:
+            query = (
+                f"{food_preference} friendly hotels {destination} {area} "
+                "accommodation breakfast dinner included"
+            )
         data = await _serper_search_async(query)
         if data:
             return _format_serper_results(data, query)
-        return self._run(destination, check_in, check_out, travelers, travel_style, neighborhood)
+        return self._run(destination, check_in, check_out, travelers, travel_style, neighborhood, food_preference, meals_included)
 
 
 class AttractionSearchInput(BaseModel):
@@ -282,6 +305,115 @@ class AttractionSearchTool(BaseTool):
         if data:
             return _format_serper_results(data, query)
         return self._run(destination, interests, budget_style)
+
+
+class PlaceDiscoveryInput(BaseModel):
+    destination: str = Field(..., description="Base city/region to search around")
+    radius_km: int = Field(300, description="Only places within this radius of the destination")
+    interests: List[str] = Field(default_factory=list, description="Interest tags to prioritize")
+
+
+class PlaceDiscoveryTool(BaseTool):
+    name: str = "Place Discovery & Scoring Search"
+    description: str = (
+        "Discovers places worth visiting within a given radius of a destination using live web "
+        "results: top-rated spots (with rating and review counts), iconic/famous landmarks, and "
+        "interest-specific recommendations. Returns raw web snippets for scoring."
+    )
+    args_schema: Type[BaseModel] = PlaceDiscoveryInput
+
+    def _run(
+        self,
+        destination: str,
+        radius_km: int = 300,
+        interests: List[str] = None,
+    ) -> str:
+        return self._mock_result(destination, radius_km, interests or [])
+
+    async def _arun(
+        self,
+        destination: str,
+        radius_km: int = 300,
+        interests: List[str] = None,
+    ) -> str:
+        interests = interests or []
+        tags = ", ".join(interests) if interests else "sightseeing"
+        queries = [
+            f"top rated places to visit in {destination} within {radius_km} km ratings reviews",
+            f"most famous iconic landmarks in {destination} must visit",
+            f"best {tags} spots in {destination} reviews",
+        ]
+        sections: List[str] = []
+        for query in queries:
+            data = await _serper_search_async(query)
+            if data:
+                sections.append(_format_serper_results(data, query))
+        if sections:
+            return "\n\n".join(sections)
+        return self._mock_result(destination, radius_km, interests)
+
+    def _mock_result(self, destination: str, radius_km: int, interests: List[str]) -> str:
+        tags = ", ".join(interests) if interests else "sightseeing"
+        return (
+            f"Place discovery for {destination} (radius {radius_km} km, interests: {tags}): "
+            "live web search is unavailable, so no rating/review data could be fetched. "
+            "Rely on the famous-attractions list and your own knowledge; flag any rating you use as estimated."
+        )
+
+
+class TravelBlogResearchInput(BaseModel):
+    destination: str = Field(..., description="Destination city/region")
+    interests: List[str] = Field(default_factory=list, description="Interest tags")
+    food_preference: str | None = Field(None, description="Dietary/food style to prioritize in research")
+
+
+class TravelBlogResearchTool(BaseTool):
+    name: str = "Travel Blog & Review Research"
+    description: str = (
+        "Searches travel blogs, reviews, and community recommendations for a destination. "
+        "Use it to mine quality signals: best time to visit a place, why it is famous, food "
+        "quality, and traveler tips."
+    )
+    args_schema: Type[BaseModel] = TravelBlogResearchInput
+
+    def _run(
+        self,
+        destination: str,
+        interests: List[str] = None,
+        food_preference: str | None = None,
+    ) -> str:
+        return self._mock_result(destination, interests or [], food_preference)
+
+    async def _arun(
+        self,
+        destination: str,
+        interests: List[str] = None,
+        food_preference: str | None = None,
+    ) -> str:
+        interests = interests or []
+        tags = ", ".join(interests) if interests else "travel"
+        queries = [
+            f"best places to visit in {destination} blog recommendations",
+            f"{destination} travel blog tips reviews experiences",
+        ]
+        if food_preference:
+            queries.append(f"best {food_preference} food in {destination} blog recommended restaurants")
+        sections: List[str] = []
+        for query in queries:
+            data = await _serper_search_async(query)
+            if data:
+                sections.append(_format_serper_results(data, query))
+        if sections:
+            return "\n\n".join(sections)
+        return self._mock_result(destination, interests, food_preference)
+
+    def _mock_result(self, destination: str, interests: List[str], food_preference: str | None) -> str:
+        food_part = f" Food preference: {food_preference}." if food_preference else ""
+        return (
+            f"Blog/review research for {destination}: live web search is unavailable. "
+            f"Interests: {', '.join(interests) if interests else 'general'}.{food_part} "
+            "No blog or review content could be fetched."
+        )
 
 
 class BudgetCalculatorInput(BaseModel):
@@ -373,5 +505,7 @@ flight_search_tool = FlightSearchTool()
 ground_transport_tool = GroundTransportTool()
 hotel_search_tool = HotelSearchTool()
 attraction_search_tool = AttractionSearchTool()
+place_discovery_tool = PlaceDiscoveryTool()
+blog_research_tool = TravelBlogResearchTool()
 budget_calculator_tool = BudgetCalculatorTool()
 async_web_search_tool = AsyncWebSearchTool()

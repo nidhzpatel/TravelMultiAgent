@@ -10,6 +10,20 @@ class StayAgent(BaseAgent):
 
     name = "StayAgent"
 
+    # Ordered most-specific-first so "non-veg" wins over "veg".
+    _FOOD_PATTERNS = [
+        "non-vegetarian", "non veg", "nonveg",
+        "gluten-free", "gluten free",
+        "vegetarian", "jain", "vegan", "halal", "kosher", "veg",
+    ]
+
+    def _extract_food_preference(self, user_input: str) -> str | None:
+        text = (user_input or "").lower()
+        for preference in self._FOOD_PATTERNS:
+            if preference in text:
+                return preference
+        return None
+
     def run(self) -> dict[str, Any] | None:
         message = self._next_message()
         if message is None:
@@ -22,6 +36,15 @@ class StayAgent(BaseAgent):
 
         if task == "modify_stay":
             change = self._plan_stay_change(user_input, current)
+            # Persist a stated food preference deterministically. The LLM may echo
+            # the CURRENT preference from the itinerary context, so an explicit
+            # preference in the user's words always wins; otherwise keep the LLM's
+            # value (it may be null).
+            extracted = self._extract_food_preference(user_input)
+            if extracted:
+                change["food_preference"] = extracted
+            elif not change.get("food_preference"):
+                change["food_preference"] = None
             self.send(
                 "Orchestrator",
                 "agent_result",
@@ -52,13 +75,18 @@ class StayAgent(BaseAgent):
 
     def _plan_stay_change(self, user_input: str, current: dict[str, Any] | None) -> dict[str, Any]:
         prompt = (
-            "You are an accommodation expert. The user wants to change hotels in their existing itinerary.\n\n"
+            "You are an accommodation expert. The user wants to change hotels in their existing itinerary.\n"
+            "Hard requirements for every stay you propose: it must serve the traveler's food preference, "
+            "breakfast and dinner must be included in the rate (lunch is always on the traveler), it must "
+            "fit the trip's travel style and budget, and why_this_choice must state the food match and "
+            "meal inclusion.\n\n"
             f"User request: {user_input}\n\n"
             f"Current itinerary context: {self._itinerary_context(current)}\n\n"
             "Respond ONLY with a raw JSON object in this exact shape (no markdown, no comments):\n"
             '{\n'
             '  "section": "stay",\n'
             '  "summary": "Short description of the change",\n'
+            '  "food_preference": "the food preference this change applies to, if the user stated one; otherwise null",\n'
             '  "stays": [\n'
             '    {\n'
             '      "night_number": 1,\n'
@@ -66,7 +94,7 @@ class StayAgent(BaseAgent):
             '      "location": "Area / City",\n'
             '      "room_type": "budget | balanced | luxury room",\n'
             '      "estimated_cost_usd": 0,\n'
-            '      "why_this_choice": "Reason for picking this hotel",\n'
+            '      "why_this_choice": "Reason, including food match and breakfast + dinner included",\n'
             '      "booking_notes": "Notes for booking"\n'
             '    }\n'
             '  ]\n'
@@ -79,12 +107,15 @@ class StayAgent(BaseAgent):
         return {
             "section": "stay",
             "summary": "Updated accommodation based on your request.",
+            "food_preference": None,
             "stays": [],
         }
 
     def _find_hotel_alternatives(self, user_input: str, current: dict[str, Any] | None) -> list[dict[str, Any]]:
         prompt = (
-            "You are an accommodation expert. List alternative hotels for this trip.\n\n"
+            "You are an accommodation expert. List alternative hotels for this trip. Every option must "
+            "serve the traveler's food preference and include breakfast and dinner in the rate; say so "
+            "in the why field.\n\n"
             f"User request: {user_input}\n\n"
             f"Current itinerary context: {self._itinerary_context(current)}\n\n"
             "Respond ONLY with a raw JSON array like (no markdown, no comments):\n"
@@ -99,19 +130,7 @@ class StayAgent(BaseAgent):
         return []
 
     def _itinerary_context(self, current: dict[str, Any] | None) -> str:
-        if not current:
-            return "No existing itinerary."
-        first_stay = None
-        if current.get("days"):
-            first_stay = current["days"][0].get("stay")
-        return json.dumps({
-            "destination": current.get("destination"),
-            "origin": current.get("origin"),
-            "currency": current.get("currency"),
-            "stay_summary": current.get("stay_summary"),
-            "current_first_stay": first_stay,
-            "travelers": current.get("travelers"),
-        })
+        return self._context(current)
 
     def _extract_json(self, raw: str) -> Any | None:
         if not raw:

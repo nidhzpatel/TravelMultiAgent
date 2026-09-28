@@ -26,7 +26,7 @@ def build_parse_crew() -> Crew:
         tasks=[parse_input_task],
         process=Process.sequential,
         memory=False,
-        verbose=True,
+        verbose=False,
     )
 
 
@@ -37,7 +37,7 @@ def build_skeleton_crew() -> Crew:
         tasks=[build_skeleton_task],
         process=Process.sequential,
         memory=False,
-        verbose=True,
+        verbose=False,
     )
 
 
@@ -48,7 +48,7 @@ def build_travel_crew() -> Crew:
         tasks=[plan_travel_task],
         process=Process.sequential,
         memory=False,
-        verbose=True,
+        verbose=False,
     )
 
 
@@ -59,7 +59,7 @@ def build_transit_mode_crew() -> Crew:
         tasks=[select_transit_mode_task],
         process=Process.sequential,
         memory=False,
-        verbose=True,
+        verbose=False,
     )
 
 
@@ -70,7 +70,7 @@ def build_stay_crew() -> Crew:
         tasks=[plan_stay_task],
         process=Process.sequential,
         memory=False,
-        verbose=True,
+        verbose=False,
     )
 
 
@@ -81,7 +81,7 @@ def build_sightseeing_crew() -> Crew:
         tasks=[plan_sightseeing_task],
         process=Process.sequential,
         memory=False,
-        verbose=True,
+        verbose=False,
     )
 
 
@@ -92,5 +92,5 @@ def build_assembly_crew() -> Crew:
         tasks=[assemble_itinerary_task],
         process=Process.sequential,
         memory=False,
-        verbose=True,
+        verbose=False,
     )

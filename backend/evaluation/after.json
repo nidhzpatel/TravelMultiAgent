@@ -1,0 +1,142 @@
+{
+  "mode": "offline scripted regression; not live answer-quality scoring",
+  "cases": [
+    {
+      "case": "test_answer_quality.QualityTests.test_alternatives_still_route",
+      "passed": true,
+      "latency_ms": 0.113,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_budget_does_not_discount_prices",
+      "passed": true,
+      "latency_ms": 2320.86,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_critic_rejects_false_without_issues",
+      "passed": true,
+      "latency_ms": 0.224,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_critic_rejects_malformed_output",
+      "passed": true,
+      "latency_ms": 0.075,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_critic_rejects_string_boolean",
+      "passed": true,
+      "latency_ms": 0.066,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_display_retains_internal_activity_cost",
+      "passed": true,
+      "latency_ms": 0.092,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_explicit_edit_still_routes",
+      "passed": true,
+      "latency_ms": 0.046,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_failed_repairs_preserve_original",
+      "passed": true,
+      "latency_ms": 0.065,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_flight_question_is_read_only",
+      "passed": true,
+      "latency_ms": 0.008,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_hotel_question_is_read_only",
+      "passed": true,
+      "latency_ms": 0.006,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_invalid_classifier_shape_does_not_crash",
+      "passed": true,
+      "latency_ms": 0.061,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_research_receives_itinerary",
+      "passed": true,
+      "latency_ms": 0.133,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_transit_currency",
+      "passed": true,
+      "latency_ms": 0.01,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_transit_edit_preserves_other_days",
+      "passed": true,
+      "latency_ms": 0.017,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    },
+    {
+      "case": "test_answer_quality.QualityTests.test_unsupported_radius_reports_failure",
+      "passed": true,
+      "latency_ms": 0.253,
+      "failure": null,
+      "retrieved_documents": [],
+      "retrieval_scores": null,
+      "live_model_metrics": null
+    }
+  ],
+  "passed": 15,
+  "total": 15
+}

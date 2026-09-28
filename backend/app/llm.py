@@ -52,7 +52,7 @@ def _build_gemini() -> Optional[BaseChatModel]:
             temperature=0.3,
         )
     except Exception as exc:  # missing package, bad key format at init, etc.
-        logger.warning("Gemini unavailable (%s); using Ollama only.", exc)
+        logger.warning("Gemini unavailable (%s); using Ollama only.", type(exc).__name__)
         return None
 
 
@@ -78,7 +78,7 @@ class GeminiWithOllamaFallback(BaseChatModel):
         except Exception as exc:
             if not _is_rate_limit(exc):
                 raise
-            logger.warning("Gemini rate-limited; falling back to Ollama for this call. (%s)", exc)
+            logger.warning("Gemini rate-limited; falling back to Ollama for this call. (%s)", type(exc).__name__)
             return self.fallback._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     async def _agenerate(
@@ -93,7 +93,7 @@ class GeminiWithOllamaFallback(BaseChatModel):
         except Exception as exc:
             if not _is_rate_limit(exc):
                 raise
-            logger.warning("Gemini rate-limited; falling back to Ollama for this call. (%s)", exc)
+            logger.warning("Gemini rate-limited; falling back to Ollama for this call. (%s)", type(exc).__name__)
             return await self.fallback._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     def bind_tools(self, tools: list, **kwargs: Any) -> "GeminiWithOllamaFallback":

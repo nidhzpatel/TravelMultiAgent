@@ -1,5 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import Any
+import logging
+import time
+
+logger = logging.getLogger(__name__)
 
 from app.swarm.message import Message
 from app.swarm.blackboard import Blackboard
@@ -51,7 +55,21 @@ class BaseAgent(ABC):
         """Call the shared LLM if available."""
         if self.llm is None:
             return ""
+        started = time.perf_counter()
         try:
-            return str(self.llm.invoke(prompt).content)
+            response = str(self.llm.invoke(prompt).content)
+            logger.info("swarm_llm agent=%s outcome=ok prompt_chars=%d response_chars=%d elapsed_ms=%d",
+                        self.name, len(prompt), len(response), (time.perf_counter() - started) * 1000)
+            return response
         except Exception as exc:
-            return f"[LLM error: {exc}]"
+            logger.warning("swarm_llm agent=%s outcome=error error_type=%s elapsed_ms=%d",
+                           self.name, type(exc).__name__, (time.perf_counter() - started) * 1000)
+            return ""
+
+    def _context(self, current: dict[str, Any] | None) -> str:
+        import json
+        return json.dumps({
+            "itinerary": current,
+            "recent_conversation": self.blackboard.get("conversation", []),
+            "evidence_status": "Unverified planning estimates; no live inventory was retrieved for this turn.",
+        })

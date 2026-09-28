@@ -9,6 +9,8 @@ export interface TravelPlanRequest {
   total_budget?: number
   exchange_rate?: number
   interests: string[]
+  radius_km?: number
+  food_preference?: string
   travel_style: string
   cover_nearby?: boolean
   dietary_notes?: string
@@ -98,6 +100,8 @@ export interface MasterTravelItinerary {
   currency: string
   exchange_rate: number
   travelers: number
+  radius_km?: number | null
+  food_preference?: string | null
   days: DayItinerary[]
   transit_summary: string
   stay_summary: string
