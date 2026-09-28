@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from app.domain.contracts import Budget, Money, PriceStatus, Provenance, Trip, TripBrief
-from app.persistence.repositories import SqlAlchemyTripRepository
+from app.persistence.repositories import SqlAlchemyTripRepository, VersionConflictError
 
 
 class V2RepositoryTests(unittest.TestCase):
@@ -45,6 +45,19 @@ class V2RepositoryTests(unittest.TestCase):
         self.assertEqual(created, retried)
         self.assertEqual(repository.list_for_owner("user_alice"), [created])
         self.assertEqual(repository.list_for_owner("user_bob"), [])
+
+    def test_append_creates_immutable_next_version_and_rejects_stale_write(self) -> None:
+        repository = SqlAlchemyTripRepository("sqlite:///:memory:")
+        repository.create_schema_for_test()
+        original = self._trip()
+        repository.create(original)
+        renamed = original.model_copy(update={"title": "Goa, revised"})
+        second = repository.append_version(renamed, expected_version=1)
+        self.assertEqual(second.version, 2)
+        self.assertEqual(repository.get_version(original.id, 1).trip.title, "Goa itinerary")
+        self.assertEqual(repository.get(original.id).trip.title, "Goa, revised")
+        with self.assertRaises(VersionConflictError):
+            repository.append_version(renamed, expected_version=1)
 
 
 if __name__ == "__main__":

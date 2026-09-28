@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+from urllib.parse import urlparse
 
 
 class Settings(BaseSettings):
@@ -34,3 +35,12 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def require_postgres_database_url(database_url: str | None = None) -> str:
+    """Validate the production v2 storage target without opening a connection."""
+    value = database_url or get_settings().database_url
+    scheme = urlparse(value).scheme
+    if scheme not in {"postgresql", "postgresql+psycopg"}:
+        raise RuntimeError("DATABASE_URL must use postgresql+psycopg in production")
+    return value

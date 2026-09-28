@@ -13,11 +13,16 @@ from app.domain.contracts import Trip, TripVersion
 from app.persistence.models import Base, IdempotencyRecord, TripMemberRecord, TripRecord, TripVersionRecord
 
 
+class VersionConflictError(Exception):
+    pass
+
+
 class TripRepository(Protocol):
     def create(self, trip: Trip, idempotency_key: str | None = None) -> TripVersion: ...
     def get(self, trip_id: str) -> TripVersion | None: ...
     def get_version(self, trip_id: str, version: int) -> TripVersion | None: ...
     def list_for_owner(self, owner_id: str) -> list[TripVersion]: ...
+    def append_version(self, trip: Trip, expected_version: int) -> TripVersion: ...
 
 
 class SqlAlchemyTripRepository:
@@ -85,6 +90,21 @@ class SqlAlchemyTripRepository:
                 .where(TripVersionRecord.trip_id == trip_id, TripVersionRecord.version == TripRecord.current_version)
             ).scalar_one_or_none()
         return TripVersion.model_validate(row) if row else None
+
+    def append_version(self, trip: Trip, expected_version: int) -> TripVersion:
+        """Append a validated snapshot only when the caller has the current version."""
+        with self._session() as session:
+            record = session.scalar(select(TripRecord).where(TripRecord.id == trip.id).with_for_update())
+            if record is None:
+                raise KeyError("Trip not found")
+            if record.current_version != expected_version:
+                raise VersionConflictError("Trip changed; fetch the latest version before retrying")
+            next_version = expected_version + 1
+            snapshot = TripVersion(trip_id=trip.id, version=next_version, trip=trip)
+            session.add(TripVersionRecord(trip_id=trip.id, version=next_version, snapshot=snapshot.model_dump(mode="json")))
+            record.title = trip.title
+            record.current_version = next_version
+        return snapshot
 
     def get_version(self, trip_id: str, version: int) -> TripVersion | None:
         with self._session() as session:
