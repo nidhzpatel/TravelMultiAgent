@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import Iterator, Protocol
 
 from sqlalchemy import Engine, Select, create_engine, select
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.contracts import Trip, TripVersion
@@ -27,7 +28,12 @@ class SqlAlchemyTripRepository:
     """
 
     def __init__(self, database_url: str, *, engine: Engine | None = None) -> None:
-        self.engine = engine or create_engine(database_url, future=True, pool_pre_ping=True)
+        if engine is not None:
+            self.engine = engine
+        elif database_url == "sqlite:///:memory:":
+            self.engine = create_engine(database_url, future=True, connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        else:
+            self.engine = create_engine(database_url, future=True, pool_pre_ping=True)
         self._sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def create_schema_for_test(self) -> None:

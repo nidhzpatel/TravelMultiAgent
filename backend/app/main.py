@@ -53,6 +53,7 @@ from app.crew.tools import (
 )
 from app.swarm.runner import SwarmRunner
 from app.swarm.blackboard import Blackboard
+from app.api.v2 import router as v2_router
 
 settings = get_settings()
 
@@ -106,6 +107,7 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+app.include_router(v2_router)
 
 app.add_middleware(
     CORSMiddleware,
