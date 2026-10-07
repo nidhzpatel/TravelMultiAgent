@@ -18,7 +18,8 @@ from fpdf import FPDF
 
 logger = logging.getLogger(__name__)
 
-from app.config import get_settings
+from app.config import get_settings, validate_production_settings
+from app.security.middleware import SecurityHeadersMiddleware
 from app.schemas import (
     TravelPlanRequest,
     TravelPlanResponse,
@@ -98,6 +99,7 @@ def _load_stores() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_production_settings(settings)
     _load_stores()
     yield
 
@@ -108,6 +110,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(v2_router)
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

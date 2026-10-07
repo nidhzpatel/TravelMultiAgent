@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     app_name: str = "VoyageMind AI"
     app_version: str = "0.1.0"
     debug: bool = False
+    environment: str = "development"
 
     # LLM configuration (Ollama)
     ollama_base_url: str = "http://localhost:11434"
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    allowed_hosts: list[str] = ["localhost", "127.0.0.1", "testserver"]
 
 
 @lru_cache
@@ -47,3 +49,14 @@ def require_postgres_database_url(database_url: str | None = None) -> str:
     if scheme not in {"postgresql", "postgresql+psycopg"}:
         raise RuntimeError("DATABASE_URL must use postgresql+psycopg in production")
     return value
+
+
+def validate_production_settings(settings: Settings | None = None) -> None:
+    settings = settings or get_settings()
+    if settings.environment.lower() != "production":
+        return
+    require_postgres_database_url(settings.database_url)
+    if not (settings.oidc_issuer and settings.oidc_audience and settings.oidc_jwks_url):
+        raise RuntimeError("OIDC issuer, audience, and JWKS URL are required in production")
+    if any(origin == "*" for origin in settings.cors_origins):
+        raise RuntimeError("Wildcard CORS origins are forbidden in production")
