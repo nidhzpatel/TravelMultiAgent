@@ -27,6 +27,9 @@ class Settings(BaseSettings):
 
     # Required by the v2 persistence/API path. Production validation is added in P2.
     database_url: str = ""
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_url: str = ""
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]

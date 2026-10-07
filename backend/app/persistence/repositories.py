@@ -23,6 +23,7 @@ class TripRepository(Protocol):
     def get_version(self, trip_id: str, version: int) -> TripVersion | None: ...
     def list_for_owner(self, owner_id: str) -> list[TripVersion]: ...
     def append_version(self, trip: Trip, expected_version: int) -> TripVersion: ...
+    def member_role(self, trip_id: str, user_id: str) -> str | None: ...
 
 
 class SqlAlchemyTripRepository:
@@ -125,6 +126,15 @@ class SqlAlchemyTripRepository:
         with self._session() as session:
             rows = session.scalars(statement).all()
         return [TripVersion.model_validate(row) for row in rows]
+
+    def member_role(self, trip_id: str, user_id: str) -> str | None:
+        with self._session() as session:
+            return session.scalar(
+                select(TripMemberRecord.role).where(
+                    TripMemberRecord.trip_id == trip_id,
+                    TripMemberRecord.user_id == user_id,
+                )
+            )
 
     @staticmethod
     def _fingerprint(payload: dict) -> str:

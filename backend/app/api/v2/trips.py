@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
 from app.domain.contracts import Budget, Trip, TripBrief, TripVersion, TravelerPreferences
 from app.persistence.repositories import SqlAlchemyTripRepository
+from app.security.identity import Principal, current_principal
 
 router = APIRouter(prefix="/v2/trips", tags=["v2 trips"])
 
@@ -19,11 +20,6 @@ class CreateTripRequest(BaseModel):
     preferences: TravelerPreferences = Field(default_factory=TravelerPreferences)
     budget: Budget
     idempotency_key: str | None = Field(default=None, min_length=16, max_length=255)
-
-
-def current_user_id(x_voyagemind_user: str = Header(min_length=1, max_length=255)) -> str:
-    """Temporary identity adapter; replaced by verified OIDC session in P2."""
-    return x_voyagemind_user
 
 
 @lru_cache
@@ -44,10 +40,10 @@ def get_repository() -> SqlAlchemyTripRepository:
 @router.post("", response_model=TripVersion, status_code=status.HTTP_201_CREATED)
 def create_trip(
     request: CreateTripRequest,
-    owner_id: str = Depends(current_user_id),
+    principal: Principal = Depends(current_principal),
     trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
 ) -> TripVersion:
-    trip = Trip(owner_id=owner_id, title=request.title, brief=request.brief, preferences=request.preferences, budget=request.budget)
+    trip = Trip(owner_id=principal.subject, title=request.title, brief=request.brief, preferences=request.preferences, budget=request.budget)
     try:
         return trip_repository.create(trip, request.idempotency_key)
     except ValueError as exc:
@@ -56,20 +52,20 @@ def create_trip(
 
 @router.get("", response_model=list[TripVersion])
 def list_trips(
-    owner_id: str = Depends(current_user_id),
+    principal: Principal = Depends(current_principal),
     trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
 ) -> list[TripVersion]:
-    return trip_repository.list_for_owner(owner_id)
+    return trip_repository.list_for_owner(principal.subject)
 
 
 @router.get("/{trip_id}", response_model=TripVersion)
 def get_trip(
     trip_id: str,
-    owner_id: str = Depends(current_user_id),
+    principal: Principal = Depends(current_principal),
     trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
 ) -> TripVersion:
     trip = trip_repository.get(trip_id)
-    if trip is None or trip.trip.owner_id != owner_id:
+    if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
     return trip
 
@@ -78,10 +74,10 @@ def get_trip(
 def get_trip_version(
     trip_id: str,
     version: int,
-    owner_id: str = Depends(current_user_id),
+    principal: Principal = Depends(current_principal),
     trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
 ) -> TripVersion:
     trip = trip_repository.get_version(trip_id, version)
-    if trip is None or trip.trip.owner_id != owner_id:
+    if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip version not found")
     return trip
