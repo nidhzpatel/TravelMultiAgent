@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings, validate_production_settings
 from app.security.middleware import SecurityHeadersMiddleware
+from app.security.limits import InMemoryRateLimiter, RateLimitExceeded
+from app.security.logging import SecretRedactionFilter
 
 
 class SecurityConfigTests(unittest.TestCase):
@@ -33,3 +35,13 @@ class SecurityConfigTests(unittest.TestCase):
         response = TestClient(app).get("/")
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertEqual(response.headers["x-frame-options"], "DENY")
+
+    def test_rate_limit_and_secret_redaction(self) -> None:
+        limiter = InMemoryRateLimiter(limit=2, window_seconds=60)
+        limiter.check("user", now=10)
+        limiter.check("user", now=11)
+        with self.assertRaises(RateLimitExceeded):
+            limiter.check("user", now=12)
+        record = __import__("logging").LogRecord("test", 20, "", 0, "Bearer abc token=secret", (), None)
+        SecretRedactionFilter().filter(record)
+        self.assertEqual(record.msg, "Bearer [REDACTED] token=[REDACTED]")

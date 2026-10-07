@@ -8,9 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import get_settings
 from app.domain.contracts import Budget, Trip, TripBrief, TripVersion, TravelerPreferences
 from app.persistence.repositories import SqlAlchemyTripRepository
-from app.security.identity import Principal, current_principal
+from app.security.identity import Principal, current_principal, enforce_rate_limit
 
-router = APIRouter(prefix="/v2/trips", tags=["v2 trips"])
+router = APIRouter(prefix="/v2/trips", tags=["v2 trips"], dependencies=[Depends(enforce_rate_limit)])
 
 
 class CreateTripRequest(BaseModel):
