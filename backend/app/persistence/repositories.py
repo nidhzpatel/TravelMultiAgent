@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import contextmanager
+from datetime import timedelta
 from typing import Iterator, Protocol
 
 from sqlalchemy import Engine, Select, create_engine, select
@@ -10,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.contracts import Trip, TripVersion
-from app.persistence.models import Base, IdempotencyRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripVersionRecord
+from app.persistence.models import Base, IdempotencyRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripVersionRecord, utcnow
 
 
 class VersionConflictError(Exception):
@@ -141,11 +142,14 @@ class SqlAlchemyTripRepository:
                 )
             )
 
-    def consume_quota(self, key: str, limit: int) -> None:
+    def consume_quota(self, key: str, limit: int, window_seconds: int = 60) -> None:
         with self._session() as session:
-            record = session.get(RateLimitRecord, key)
+            record = session.scalar(select(RateLimitRecord).where(RateLimitRecord.key == key).with_for_update())
             if record is None:
                 session.add(RateLimitRecord(key=key, count=1))
+            elif (record.window_started_at.replace(tzinfo=utcnow().tzinfo) if record.window_started_at.tzinfo is None else record.window_started_at) + timedelta(seconds=window_seconds) <= utcnow():
+                record.window_started_at = utcnow()
+                record.count = 1
             elif record.count >= limit:
                 raise QuotaExceededError("Rate limit exceeded")
             else:

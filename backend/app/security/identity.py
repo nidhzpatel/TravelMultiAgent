@@ -79,7 +79,8 @@ def enforce_rate_limit(principal: Principal = Depends(current_principal)) -> Non
     try:
         database_url = get_settings().database_url
         if database_url:
-            SqlAlchemyTripRepository(database_url).consume_quota(principal.subject, get_settings().rate_limit_per_minute)
+            settings = get_settings()
+            SqlAlchemyTripRepository(database_url).consume_quota(principal.subject, settings.rate_limit_per_minute, settings.rate_limit_window_seconds)
         else:
             rate_limiter().check(principal.subject)
     except (RateLimitExceeded, QuotaExceededError) as exc:

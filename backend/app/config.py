@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     oidc_audience: str = ""
     oidc_jwks_url: str = ""
     rate_limit_per_minute: int = 60
+    rate_limit_window_seconds: int = 60
     session_secret: str = ""
 
     # CORS

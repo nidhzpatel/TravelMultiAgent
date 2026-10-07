@@ -20,6 +20,7 @@ class SecurityConfigTests(unittest.TestCase):
                 oidc_issuer="https://issuer.example",
                 oidc_audience="voyagemind-api",
                 oidc_jwks_url="https://issuer.example/.well-known/jwks.json",
+                session_secret="01234567890123456789012345678901",
                 cors_origins=["https://app.example"],
             )
         )

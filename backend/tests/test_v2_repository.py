@@ -1,10 +1,12 @@
 from decimal import Decimal
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from app.domain.contracts import Budget, Money, PriceStatus, Provenance, Trip, TripBrief
 from app.persistence.repositories import QuotaExceededError, SqlAlchemyTripRepository, VersionConflictError
+from app.persistence.models import RateLimitRecord, utcnow
 
 
 class V2RepositoryTests(unittest.TestCase):
@@ -66,6 +68,9 @@ class V2RepositoryTests(unittest.TestCase):
         repository.consume_quota("user_alice", 2)
         with self.assertRaises(QuotaExceededError):
             repository.consume_quota("user_alice", 2)
+        with repository._session() as session:
+            session.get(RateLimitRecord, "user_alice").window_started_at = utcnow() - timedelta(seconds=61)
+        repository.consume_quota("user_alice", 2, window_seconds=60)
 
 
 if __name__ == "__main__":
