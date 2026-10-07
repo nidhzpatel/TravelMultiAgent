@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from app.domain.contracts import Budget, Money, PriceStatus, Provenance, Trip, TripBrief
-from app.persistence.repositories import SqlAlchemyTripRepository, VersionConflictError
+from app.persistence.repositories import QuotaExceededError, SqlAlchemyTripRepository, VersionConflictError
 
 
 class V2RepositoryTests(unittest.TestCase):
@@ -58,6 +58,14 @@ class V2RepositoryTests(unittest.TestCase):
         self.assertEqual(repository.get(original.id).trip.title, "Goa, revised")
         with self.assertRaises(VersionConflictError):
             repository.append_version(renamed, expected_version=1)
+
+    def test_durable_quota_rejects_excess_requests(self) -> None:
+        repository = SqlAlchemyTripRepository("sqlite:///:memory:")
+        repository.create_schema_for_test()
+        repository.consume_quota("user_alice", 2)
+        repository.consume_quota("user_alice", 2)
+        with self.assertRaises(QuotaExceededError):
+            repository.consume_quota("user_alice", 2)
 
 
 if __name__ == "__main__":

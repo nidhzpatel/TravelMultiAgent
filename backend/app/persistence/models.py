@@ -57,3 +57,10 @@ class IdempotencyRecord(Base):
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     response_payload: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class RateLimitRecord(Base):
+    __tablename__ = "rate_limit_records"
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

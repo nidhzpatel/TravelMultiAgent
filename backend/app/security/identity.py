@@ -4,11 +4,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Cookie, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import get_settings
 from app.security.limits import InMemoryRateLimiter, RateLimitExceeded
+from app.persistence.repositories import QuotaExceededError, SqlAlchemyTripRepository
 
 
 @dataclass(frozen=True)
@@ -49,9 +50,25 @@ def rate_limiter() -> InMemoryRateLimiter:
     return InMemoryRateLimiter(limit=get_settings().rate_limit_per_minute)
 
 
-def current_principal(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> Principal:
-    if credentials is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bearer token required")
+def current_principal(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    vm_session: str | None = Cookie(default=None),
+) -> Principal:
+    if credentials is None and not vm_session:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    if vm_session:
+        secret = get_settings().session_secret
+        if len(secret) < 32:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
+        try:
+            claims = jwt.decode(vm_session, secret, algorithms=["HS256"])
+            subject = claims.get("sub")
+            if not isinstance(subject, str) or not subject:
+                raise ValueError("Session subject is missing")
+            email = claims.get("email")
+            return Principal(subject=subject, email=email if isinstance(email, str) else None)
+        except (ValueError, jwt.PyJWTError) as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session") from exc
     try:
         return token_verifier().verify(credentials.credentials)
     except (RuntimeError, ValueError, jwt.PyJWTError) as exc:
@@ -60,6 +77,10 @@ def current_principal(credentials: HTTPAuthorizationCredentials | None = Depends
 
 def enforce_rate_limit(principal: Principal = Depends(current_principal)) -> None:
     try:
-        rate_limiter().check(principal.subject)
-    except RateLimitExceeded as exc:
+        database_url = get_settings().database_url
+        if database_url:
+            SqlAlchemyTripRepository(database_url).consume_quota(principal.subject, get_settings().rate_limit_per_minute)
+        else:
+            rate_limiter().check(principal.subject)
+    except (RateLimitExceeded, QuotaExceededError) as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded") from exc

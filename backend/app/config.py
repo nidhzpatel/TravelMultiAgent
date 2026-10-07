@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     oidc_audience: str = ""
     oidc_jwks_url: str = ""
     rate_limit_per_minute: int = 60
+    session_secret: str = ""
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -59,5 +60,7 @@ def validate_production_settings(settings: Settings | None = None) -> None:
     require_postgres_database_url(settings.database_url)
     if not (settings.oidc_issuer and settings.oidc_audience and settings.oidc_jwks_url):
         raise RuntimeError("OIDC issuer, audience, and JWKS URL are required in production")
+    if len(settings.session_secret) < 32:
+        raise RuntimeError("SESSION_SECRET must contain at least 32 characters in production")
     if any(origin == "*" for origin in settings.cors_origins):
         raise RuntimeError("Wildcard CORS origins are forbidden in production")

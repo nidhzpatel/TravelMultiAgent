@@ -10,10 +10,14 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.contracts import Trip, TripVersion
-from app.persistence.models import Base, IdempotencyRecord, TripMemberRecord, TripRecord, TripVersionRecord
+from app.persistence.models import Base, IdempotencyRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripVersionRecord
 
 
 class VersionConflictError(Exception):
+    pass
+
+
+class QuotaExceededError(Exception):
     pass
 
 
@@ -136,6 +140,16 @@ class SqlAlchemyTripRepository:
                     TripMemberRecord.user_id == user_id,
                 )
             )
+
+    def consume_quota(self, key: str, limit: int) -> None:
+        with self._session() as session:
+            record = session.get(RateLimitRecord, key)
+            if record is None:
+                session.add(RateLimitRecord(key=key, count=1))
+            elif record.count >= limit:
+                raise QuotaExceededError("Rate limit exceeded")
+            else:
+                record.count += 1
 
     def set_member_role(self, trip_id: str, user_id: str, role: str) -> None:
         if role not in {"OWNER", "EDITOR", "VIEWER"}:

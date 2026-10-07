@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
 from app.domain.contracts import Budget, Trip, TripBrief, TripVersion, TravelerPreferences
 from app.persistence.repositories import SqlAlchemyTripRepository
 from app.security.identity import Principal, current_principal, enforce_rate_limit
+from app.security.sessions import create_session
 
 router = APIRouter(prefix="/v2/trips", tags=["v2 trips"], dependencies=[Depends(enforce_rate_limit)])
 
@@ -25,6 +26,15 @@ class CreateTripRequest(BaseModel):
 class SetMemberRoleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: str = Field(pattern="^(EDITOR|VIEWER)$")
+
+
+@router.post("/session", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+def create_browser_session(principal: Principal = Depends(current_principal)) -> Response:
+    session, csrf = create_session(principal)
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.set_cookie("vm_session", session, httponly=True, secure=True, samesite="lax", max_age=8 * 3600)
+    response.set_cookie("vm_csrf", csrf, httponly=False, secure=True, samesite="lax", max_age=8 * 3600)
+    return response
 
 
 @lru_cache
@@ -85,6 +95,20 @@ def get_trip_version(
     trip = trip_repository.get_version(trip_id, version)
     if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip version not found")
+    return trip
+
+
+@router.get("/{trip_id}/export", response_model=TripVersion)
+def export_trip(
+    trip_id: str,
+    version: int | None = None,
+    principal: Principal = Depends(current_principal),
+    trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
+) -> TripVersion:
+    """Version-pinned structured export; PDF rendering moves to the export worker."""
+    trip = trip_repository.get_version(trip_id, version) if version else trip_repository.get(trip_id)
+    if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
     return trip
 
 
