@@ -40,6 +40,14 @@ class V2ApiTests(unittest.TestCase):
             200,
         )
         self.assertEqual(self.repository.member_role(trip_id, "user_bob"), "VIEWER")
+        proposal = {"expected_version": 1, "idempotency_key": "proposal-replace-title-0001", "operations": [{"kind": "REPLACE", "path": "title", "value": "Revised Goa"}]}
+        preview = self.client.post(f"/v2/trips/{trip_id}/proposals", json=proposal)
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["preview"]["title"], "Revised Goa")
+        committed = self.client.post(f"/v2/trips/{trip_id}/proposals/commit", json=proposal)
+        self.assertEqual(committed.status_code, 200)
+        self.assertEqual(committed.json()["version"], 2)
+        self.assertEqual(self.client.post(f"/v2/trips/{trip_id}/proposals/commit", json=proposal).status_code, 409)
 
 
 if __name__ == "__main__":

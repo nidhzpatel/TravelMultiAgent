@@ -10,6 +10,9 @@ from app.domain.contracts import Budget, Trip, TripBrief, TripVersion, TravelerP
 from app.persistence.repositories import SqlAlchemyTripRepository
 from app.security.identity import Principal, current_principal, enforce_rate_limit
 from app.security.sessions import create_session
+from app.operations.contracts import ProposalRequest
+from app.operations.service import OperationValidationError, apply_operations, commit_replace
+from app.persistence.repositories import VersionConflictError
 
 router = APIRouter(prefix="/v2/trips", tags=["v2 trips"], dependencies=[Depends(enforce_rate_limit)])
 
@@ -110,6 +113,41 @@ def export_trip(
     if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
     return trip
+
+
+@router.post("/{trip_id}/proposals")
+def preview_proposal(
+    trip_id: str,
+    request: ProposalRequest,
+    principal: Principal = Depends(current_principal),
+    trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
+) -> dict:
+    trip = trip_repository.get(trip_id)
+    if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR"}:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    if trip.version != request.expected_version:
+        raise HTTPException(status_code=409, detail="Trip changed; fetch the latest version")
+    try:
+        proposed = apply_operations(trip.trip, request)
+    except OperationValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"base_version": trip.version, "preview": proposed.model_dump(mode="json")}
+
+
+@router.post("/{trip_id}/proposals/commit", response_model=TripVersion)
+def commit_proposal(
+    trip_id: str,
+    request: ProposalRequest,
+    principal: Principal = Depends(current_principal),
+    trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
+) -> TripVersion:
+    trip = trip_repository.get(trip_id)
+    if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR"}:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    try:
+        return commit_replace(trip_repository, trip.trip, request)
+    except (OperationValidationError, VersionConflictError) as exc:
+        raise HTTPException(status_code=409 if isinstance(exc, VersionConflictError) else 422, detail=str(exc)) from exc
 
 
 @router.put("/{trip_id}/members/{user_id}", status_code=status.HTTP_200_OK)
