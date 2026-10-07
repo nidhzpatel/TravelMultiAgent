@@ -24,6 +24,7 @@ class TripRepository(Protocol):
     def list_for_owner(self, owner_id: str) -> list[TripVersion]: ...
     def append_version(self, trip: Trip, expected_version: int) -> TripVersion: ...
     def member_role(self, trip_id: str, user_id: str) -> str | None: ...
+    def set_member_role(self, trip_id: str, user_id: str, role: str) -> None: ...
 
 
 class SqlAlchemyTripRepository:
@@ -135,6 +136,21 @@ class SqlAlchemyTripRepository:
                     TripMemberRecord.user_id == user_id,
                 )
             )
+
+    def set_member_role(self, trip_id: str, user_id: str, role: str) -> None:
+        if role not in {"OWNER", "EDITOR", "VIEWER"}:
+            raise ValueError("Unsupported membership role")
+        with self._session() as session:
+            record = session.scalar(
+                select(TripMemberRecord).where(
+                    TripMemberRecord.trip_id == trip_id,
+                    TripMemberRecord.user_id == user_id,
+                )
+            )
+            if record:
+                record.role = role
+            else:
+                session.add(TripMemberRecord(trip_id=trip_id, user_id=user_id, role=role))
 
     @staticmethod
     def _fingerprint(payload: dict) -> str:

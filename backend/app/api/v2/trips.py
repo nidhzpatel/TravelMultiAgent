@@ -22,6 +22,11 @@ class CreateTripRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=16, max_length=255)
 
 
+class SetMemberRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: str = Field(pattern="^(EDITOR|VIEWER)$")
+
+
 @lru_cache
 def repository() -> SqlAlchemyTripRepository:
     database_url = get_settings().database_url
@@ -81,3 +86,17 @@ def get_trip_version(
     if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip version not found")
     return trip
+
+
+@router.put("/{trip_id}/members/{user_id}", status_code=status.HTTP_200_OK)
+def set_member_role(
+    trip_id: str,
+    user_id: str,
+    request: SetMemberRoleRequest,
+    principal: Principal = Depends(current_principal),
+    trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
+) -> dict[str, str]:
+    if trip_repository.member_role(trip_id, principal.subject) != "OWNER":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
+    trip_repository.set_member_role(trip_id, user_id, request.role)
+    return {"role": request.role}

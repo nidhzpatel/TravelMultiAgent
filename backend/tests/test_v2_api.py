@@ -35,6 +35,11 @@ class V2ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/v2/trips", headers=self.headers).json()[0]["trip_id"], trip_id)
         self.assertEqual(self.client.get(f"/v2/trips/{trip_id}", headers=self.headers).status_code, 200)
         self.assertEqual(self.client.get(f"/v2/trips/{trip_id}/versions/1", headers=self.headers).status_code, 200)
+        self.assertEqual(
+            self.client.put(f"/v2/trips/{trip_id}/members/user_bob", json={"role": "VIEWER"}).status_code,
+            200,
+        )
+        self.assertEqual(self.repository.member_role(trip_id, "user_bob"), "VIEWER")
 
 
 if __name__ == "__main__":
