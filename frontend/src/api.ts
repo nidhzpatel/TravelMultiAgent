@@ -8,8 +8,13 @@ import type {
   ChatMessageResponse,
   ChatSession,
 } from './types'
+import type { ProposalPreview, ProposalRequest, TripVersion } from './types/v2'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+
+function csrfToken(): string {
+  return document.cookie.match(/(?:^|; )vm_csrf=([^;]*)/)?.[1] ?? ''
+}
 
 export async function startPlan(
   request: TravelPlanRequest,
@@ -113,4 +118,22 @@ export async function listChats(): Promise<ChatSession[]> {
   }
 
   return res.json() as Promise<ChatSession[]>
+}
+
+export async function previewTripProposal(tripId: string, request: ProposalRequest): Promise<ProposalPreview> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}/proposals`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() }, body: JSON.stringify(request) })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to preview change')
+  return res.json() as Promise<ProposalPreview>
+}
+
+export async function getV2Trip(tripId: string): Promise<TripVersion> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}`, { credentials: 'include' })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to load trip')
+  return res.json() as Promise<TripVersion>
+}
+
+export async function commitTripProposal(tripId: string, proposalId: string): Promise<TripVersion> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}/proposals/${proposalId}/commit`, { method: 'POST', credentials: 'include', headers: { 'X-CSRF-Token': csrfToken() } })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to apply change')
+  return res.json() as Promise<TripVersion>
 }

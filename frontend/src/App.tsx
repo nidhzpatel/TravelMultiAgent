@@ -6,12 +6,14 @@ import Scene3D from './components/Scene3D'
 import RetroOverlay from './components/RetroOverlay'
 import Sidebar from './components/Sidebar'
 import HomeScreen from './components/HomeScreen'
+import V2ProposalWorkspace from './components/V2ProposalWorkspace'
 import { createChat, sendChatMessage, listChats } from './api'
 import type { ChatSession } from './types'
 
 type Scene = 'prompt' | 'chat'
 
 export default function App() {
+  const v2TripId = new URLSearchParams(window.location.search).get('trip_id')
   const [scene, setScene] = useState<Scene>('prompt')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -141,6 +143,8 @@ export default function App() {
 
       <div className="absolute inset-0 z-10 bg-gradient-to-b from-transparent via-[#020617]/40 to-[#020617]/90" />
 
+      {v2TripId ? <V2ProposalWorkspace tripId={v2TripId} /> : <>
+
       <button
         onClick={() => setSidebarOpen(true)}
         className="fixed left-4 top-4 z-50 rounded-xl border border-white/10 bg-white/5 p-2 text-slate-300 hover:bg-white/10 hover:text-white md:hidden"
@@ -205,6 +209,7 @@ export default function App() {
           <p className="mt-1 text-sm opacity-90">{error}</p>
         </motion.div>
       )}
+      </>}
     </div>
   )
 }

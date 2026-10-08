@@ -72,6 +72,21 @@ class V2RepositoryTests(unittest.TestCase):
             session.get(RateLimitRecord, "user_alice").window_started_at = utcnow() - timedelta(seconds=61)
         repository.consume_quota("user_alice", 2, window_seconds=60)
 
+    def test_proposal_persists_preview_and_commit_marker(self) -> None:
+        repository = SqlAlchemyTripRepository("sqlite:///:memory:")
+        repository.create_schema_for_test()
+        trip = self._trip()
+        repository.create(trip)
+        proposal_id = "proposal_" + "a" * 32
+        repository.create_proposal(proposal_id, trip.id, trip.owner_id, "proposal-key-0001", 1, {"operations": []}, {"title": "Preview"})
+        proposal = repository.get_proposal(proposal_id, trip.id, trip.owner_id)
+        self.assertEqual(proposal.preview["title"], "Preview")
+        repository.mark_proposal_committed(proposal_id, 2)
+        self.assertEqual(repository.get_proposal(proposal_id, trip.id, trip.owner_id).committed_version, 2)
+        self.assertEqual(repository.create_proposal("proposal_" + "b" * 32, trip.id, trip.owner_id, "proposal-key-0001", 1, {"operations": []}, {"title": "Preview"}), proposal_id)
+        with self.assertRaises(ValueError):
+            repository.create_proposal("proposal_" + "c" * 32, trip.id, trip.owner_id, "proposal-key-0001", 1, {"operations": [{"kind": "READ"}]}, {"title": "Preview"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,11 +7,12 @@ from datetime import timedelta
 from typing import Iterator, Protocol
 
 from sqlalchemy import Engine, Select, create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.contracts import Trip, TripVersion
-from app.persistence.models import Base, IdempotencyRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripVersionRecord, utcnow
+from app.persistence.models import Base, IdempotencyRecord, ProposalRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripVersionRecord, utcnow
 
 
 class VersionConflictError(Exception):
@@ -169,6 +170,46 @@ class SqlAlchemyTripRepository:
                 record.role = role
             else:
                 session.add(TripMemberRecord(trip_id=trip_id, user_id=user_id, role=role))
+
+    def create_proposal(self, proposal_id: str, trip_id: str, owner_id: str, idempotency_key: str, base_version: int, payload: dict, preview: dict, idempotency_payload: dict | None = None) -> str:
+        fingerprint = self._fingerprint(idempotency_payload if idempotency_payload is not None else payload)
+        with self._session() as session:
+            existing = session.scalar(select(ProposalRecord).where(ProposalRecord.trip_id == trip_id, ProposalRecord.owner_id == owner_id, ProposalRecord.idempotency_key == idempotency_key))
+            if existing:
+                if existing.request_fingerprint != fingerprint:
+                    raise ValueError("Idempotency key was reused for a different proposal")
+                return existing.id
+            try:
+                with session.begin_nested():
+                    session.add(ProposalRecord(id=proposal_id, trip_id=trip_id, owner_id=owner_id, idempotency_key=idempotency_key, request_fingerprint=fingerprint, base_version=base_version, payload=payload, preview=preview))
+                    session.flush()
+            except IntegrityError:
+                existing = session.scalar(select(ProposalRecord).where(ProposalRecord.trip_id == trip_id, ProposalRecord.owner_id == owner_id, ProposalRecord.idempotency_key == idempotency_key))
+                if existing is None:
+                    raise
+                if existing.request_fingerprint != fingerprint:
+                    raise ValueError("Idempotency key was reused for a different proposal")
+                return existing.id
+        return proposal_id
+
+    def get_proposal_by_key(self, trip_id: str, owner_id: str, idempotency_key: str, payload: dict) -> ProposalRecord | None:
+        fingerprint = self._fingerprint(payload)
+        with self._session() as session:
+            proposal = session.scalar(select(ProposalRecord).where(ProposalRecord.trip_id == trip_id, ProposalRecord.owner_id == owner_id, ProposalRecord.idempotency_key == idempotency_key))
+            if proposal and proposal.request_fingerprint != fingerprint:
+                raise ValueError("Idempotency key was reused for a different proposal")
+            return proposal
+
+    def get_proposal(self, proposal_id: str, trip_id: str, owner_id: str) -> ProposalRecord | None:
+        with self._session() as session:
+            return session.scalar(select(ProposalRecord).where(ProposalRecord.id == proposal_id, ProposalRecord.trip_id == trip_id, ProposalRecord.owner_id == owner_id))
+
+    def mark_proposal_committed(self, proposal_id: str, version: int) -> None:
+        with self._session() as session:
+            proposal = session.get(ProposalRecord, proposal_id)
+            if proposal is None:
+                raise KeyError("Proposal not found")
+            proposal.committed_version = version
 
     @staticmethod
     def _fingerprint(payload: dict) -> str:

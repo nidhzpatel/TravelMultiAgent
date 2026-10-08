@@ -64,3 +64,18 @@ class RateLimitRecord(Base):
     key: Mapped[str] = mapped_column(String(255), primary_key=True)
     window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ProposalRecord(Base):
+    __tablename__ = "operation_proposals"
+    __table_args__ = (UniqueConstraint("trip_id", "owner_id", "idempotency_key", name="uq_operation_proposals_trip_owner_key"),)
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    trip_id: Mapped[str] = mapped_column(ForeignKey("trips.id", ondelete="CASCADE"), nullable=False, index=True)
+    base_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    preview: Mapped[dict] = mapped_column(JSON, nullable=False)
+    committed_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)

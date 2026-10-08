@@ -52,3 +52,26 @@ export interface TripVersion {
   created_at: string;
   trip: Trip;
 }
+
+export interface Operation {
+  kind: "READ" | "ADD" | "REMOVE" | "REPLACE" | "MOVE" | "REORDER" | "REPLAN";
+  target_id?: string | null;
+  path?: "title" | "preferences.interests" | "preferences.pace" | null;
+  value?: string | null;
+  values?: string[] | null;
+  index?: number | null;
+}
+
+export interface ProposalRequest {
+  expected_version: number;
+  idempotency_key: string;
+  operations: Operation[];
+}
+
+export interface ProposalPreview {
+  proposal_id: string;
+  base_version: number;
+  preview: Trip;
+  changed_fields: string[];
+  changes: Array<{ entity_id: string; fields: string[] }>;
+}
