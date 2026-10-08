@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fpdf import FPDF
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
-from app.domain.contracts import Budget, BudgetBreakdown, Evidence, Expense, Trip, TripBrief, TripVersion, TravelerPreferences, new_id
+from app.domain.contracts import Budget, BudgetBreakdown, Destination, Evidence, Expense, TransportLeg, Trip, TripBrief, TripDay, TripVersion, TravelerPreferences, new_id
 from app.planning.budget import build_budget_breakdown
 from app.persistence.repositories import SqlAlchemyTripRepository
 from app.security.identity import Principal, current_principal, enforce_rate_limit
@@ -26,6 +27,10 @@ class CreateTripRequest(BaseModel):
     brief: TripBrief
     preferences: TravelerPreferences = Field(default_factory=TravelerPreferences)
     budget: Budget
+    destinations: tuple[Destination, ...] = ()
+    days: tuple[TripDay, ...] = ()
+    transport_legs: tuple[TransportLeg, ...] = ()
+    radius_km: Decimal = Field(default=Decimal("300"), gt=0, le=5000)
     idempotency_key: str | None = Field(default=None, min_length=16, max_length=255)
 
 
@@ -93,7 +98,7 @@ def create_trip(
     principal: Principal = Depends(current_principal),
     trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
 ) -> TripVersion:
-    trip = Trip(owner_id=principal.subject, title=request.title, brief=request.brief, preferences=request.preferences, budget=request.budget)
+    trip = Trip(owner_id=principal.subject, title=request.title, brief=request.brief, preferences=request.preferences, budget=request.budget, destinations=request.destinations, days=request.days, transport_legs=request.transport_legs, radius_km=request.radius_km)
     try:
         return trip_repository.create(trip, request.idempotency_key)
     except ValueError as exc:

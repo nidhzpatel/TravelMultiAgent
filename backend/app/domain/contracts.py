@@ -7,6 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -155,17 +156,47 @@ class Destination(DomainModel):
     timezone: str | None = Field(default=None, max_length=80)
     evidence_ids: tuple[OpaqueId, ...] = ()
 
+    @model_validator(mode="after")
+    def coordinates_and_timezone_are_coherent(self) -> "Destination":
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Destination coordinates must be complete")
+        if self.timezone:
+            try:
+                ZoneInfo(self.timezone)
+            except ZoneInfoNotFoundError as exc:
+                raise ValueError("Destination timezone must be an IANA timezone") from exc
+        return self
+
+
+class OpeningWindow(DomainModel):
+    opens_at: datetime
+    closes_at: datetime
+
+    @model_validator(mode="after")
+    def check_window(self) -> "OpeningWindow":
+        if self.opens_at.tzinfo is None or self.closes_at.tzinfo is None or self.closes_at <= self.opens_at:
+            raise ValueError("Opening windows require ordered timezone-aware timestamps")
+        return self
+
 
 class ScheduledItem(DomainModel):
     id: OpaqueId = Field(default_factory=lambda: new_id("item"))
     kind: Literal["activity", "restaurant", "flight", "hotel", "transport"]
     entity_id: OpaqueId
+    destination_id: OpaqueId | None = None
     start_at: datetime | None = None
     end_at: datetime | None = None
+    opening_windows: tuple[OpeningWindow, ...] = ()
+    required_buffer_minutes: int = Field(default=15, ge=0, le=240)
+    critical: bool = True
 
     @model_validator(mode="after")
     def check_time_window(self) -> "ScheduledItem":
-        if self.start_at and self.end_at and self.end_at < self.start_at:
+        if (self.start_at is None) != (self.end_at is None):
+            raise ValueError("Scheduled item times must be complete")
+        if self.start_at and (self.start_at.tzinfo is None or self.end_at.tzinfo is None):
+            raise ValueError("Scheduled item times must be timezone-aware")
+        if self.start_at and self.end_at and self.end_at <= self.start_at:
             raise ValueError("Scheduled item ends before it starts")
         return self
 
@@ -175,6 +206,37 @@ class TripDay(DomainModel):
     local_date: date
     timezone: str = Field(min_length=1, max_length=80)
     scheduled_item_ids: tuple[OpaqueId, ...] = ()
+    scheduled_items: tuple[ScheduledItem, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_item_ids(cls, value: object) -> object:
+        if isinstance(value, dict) and value.get("scheduled_items"):
+            value = dict(value)
+            items: list[ScheduledItem | dict] = []
+            for raw_item in value["scheduled_items"]:
+                if isinstance(raw_item, ScheduledItem):
+                    items.append(raw_item)
+                else:
+                    item = dict(raw_item)
+                    item.setdefault("id", new_id("item"))
+                    items.append(item)
+            value["scheduled_items"] = tuple(items)
+            if not value.get("scheduled_item_ids"):
+                value["scheduled_item_ids"] = tuple(
+                    item.id if isinstance(item, ScheduledItem) else item["id"] for item in items
+                )
+        return value
+
+    @model_validator(mode="after")
+    def validate_items(self) -> "TripDay":
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("Trip day timezone must be an IANA timezone") from exc
+        if self.scheduled_item_ids and self.scheduled_item_ids != tuple(item.id for item in self.scheduled_items):
+            raise ValueError("Trip day item IDs must match scheduled items")
+        return self
 
 
 class Activity(DomainModel):
@@ -212,8 +274,39 @@ class TransportLeg(DomainModel):
     origin_destination_id: OpaqueId
     destination_destination_id: OpaqueId
     mode: Literal["flight", "train", "bus", "metro", "cab", "walk"]
+    route_status: Literal["REACHABLE", "UNREACHABLE", "UNKNOWN"] = "UNKNOWN"
     duration_minutes: Fact = Field(default_factory=lambda: Fact(status=FactStatus.UNKNOWN))
+    distance_km: Decimal | None = Field(default=None, ge=0)
+    depart_at: datetime | None = None
+    arrive_at: datetime | None = None
+    source_provider: str | None = None
+    retrieved_at: datetime | None = None
+    expires_at: datetime | None = None
+    evidence_ids: tuple[OpaqueId, ...] = ()
     expense_ids: tuple[OpaqueId, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_provider_route(self) -> "TransportLeg":
+        if self.route_status == "REACHABLE":
+            if type(self.duration_minutes.value) is not int or self.duration_minutes.value < 0:
+                raise ValueError("Reachable routes require a provider duration")
+            if not self.source_provider or not self.evidence_ids or self.retrieved_at is None or self.expires_at is None:
+                raise ValueError("Reachable routes require provider evidence and a freshness window")
+        elif self.duration_minutes.value is not None:
+            raise ValueError("Unknown or unreachable routes cannot carry durations")
+        if (self.retrieved_at is None) != (self.expires_at is None):
+            raise ValueError("Route freshness timestamps must be complete")
+        if self.retrieved_at and (
+            self.retrieved_at.tzinfo is None
+            or self.expires_at.tzinfo is None
+            or self.expires_at <= self.retrieved_at
+        ):
+            raise ValueError("Route freshness timestamps must be ordered and timezone-aware")
+        if (self.depart_at is None) != (self.arrive_at is None):
+            raise ValueError("Route times must be complete")
+        if self.depart_at and (self.depart_at.tzinfo is None or self.arrive_at.tzinfo is None or self.arrive_at <= self.depart_at):
+            raise ValueError("Route times must be ordered and timezone-aware")
+        return self
 
 
 class FxSnapshot(DomainModel):
@@ -337,7 +430,44 @@ class Trip(DomainModel):
     budget: Budget
     destination_ids: tuple[OpaqueId, ...] = ()
     day_ids: tuple[OpaqueId, ...] = ()
+    destinations: tuple[Destination, ...] = ()
+    days: tuple[TripDay, ...] = ()
+    transport_legs: tuple[TransportLeg, ...] = ()
+    radius_km: Decimal = Field(default=Decimal("300"), gt=0, le=5000)
     readiness: TripReadiness = TripReadiness.DRAFT
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_plan_ids(cls, value: object) -> object:
+        if isinstance(value, dict):
+            value = dict(value)
+            if value.get("destinations"):
+                destinations: list[Destination | dict] = []
+                for raw_destination in value["destinations"]:
+                    if isinstance(raw_destination, Destination):
+                        destinations.append(raw_destination)
+                    else:
+                        destination = dict(raw_destination)
+                        destination.setdefault("id", new_id("destination"))
+                        destinations.append(destination)
+                value["destinations"] = tuple(destinations)
+                if not value.get("destination_ids"):
+                    value["destination_ids"] = tuple(
+                        item.id if isinstance(item, Destination) else item["id"] for item in destinations
+                    )
+            if value.get("days"):
+                days: list[TripDay | dict] = []
+                for raw_day in value["days"]:
+                    if isinstance(raw_day, TripDay):
+                        days.append(raw_day)
+                    else:
+                        day = dict(raw_day)
+                        day.setdefault("id", new_id("day"))
+                        days.append(day)
+                value["days"] = tuple(days)
+                if not value.get("day_ids"):
+                    value["day_ids"] = tuple(item.id if isinstance(item, TripDay) else item["id"] for item in days)
+        return value
 
     @model_validator(mode="after")
     def ready_trip_has_complete_budget(self) -> "Trip":
@@ -358,6 +488,13 @@ class Trip(DomainModel):
                 for expense in self.budget.expenses
             ):
                 raise ValueError("Mock costs cannot produce READY_TO_BOOK")
+            from app.validation.snapshot import validate_trip_snapshot
+            if not self.days or any(result.severity == "error" for result in validate_trip_snapshot(self)):
+                raise ValueError("Unresolved geography or timeline conflicts block READY_TO_BOOK")
+        if self.destinations and self.destination_ids != tuple(item.id for item in self.destinations):
+            raise ValueError("Trip destination IDs must match destinations")
+        if self.days and self.day_ids != tuple(item.id for item in self.days):
+            raise ValueError("Trip day IDs must match days")
         return self
 
 

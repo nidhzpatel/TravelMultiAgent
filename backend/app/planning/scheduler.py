@@ -1,6 +1,6 @@
 """Timezone-aware scheduled items and deterministic buffer placement."""
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -49,7 +49,7 @@ class PlannedDay(BaseModel):
 def schedule_after(previous: PlannedItem, item: PlannedItem, route: RouteResult, buffer_minutes: int = 15) -> PlannedItem:
     if route.status is not RouteStatus.REACHABLE or route.duration_minutes is None:
         raise ValueError("A provider route duration is required before scheduling")
-    earliest = previous.end_at + timedelta(minutes=route.duration_minutes + buffer_minutes)
+    earliest = (previous.end_at.astimezone(UTC) + timedelta(minutes=route.duration_minutes + buffer_minutes)).astimezone(item.start_at.tzinfo)
     start = max(item.start_at, earliest)
     duration = item.end_at - item.start_at
     candidate = item.model_copy(update={"start_at": start, "end_at": start + duration})

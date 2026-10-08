@@ -102,6 +102,58 @@ export interface TravelerPreferences {
   transport_preferences: string[];
 }
 
+export interface Destination {
+  id: string;
+  name: string;
+  provider_place_id: string | null;
+  latitude: string | null;
+  longitude: string | null;
+  timezone: string | null;
+  evidence_ids: string[];
+}
+
+export interface OpeningWindow {
+  opens_at: string;
+  closes_at: string;
+}
+
+export interface ScheduledItem {
+  id: string;
+  kind: "activity" | "restaurant" | "flight" | "hotel" | "transport";
+  entity_id: string;
+  destination_id: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  opening_windows: OpeningWindow[];
+  required_buffer_minutes: number;
+  critical: boolean;
+}
+
+export interface TripDay {
+  id: string;
+  local_date: string;
+  timezone: string;
+  scheduled_item_ids: string[];
+  scheduled_items: ScheduledItem[];
+}
+
+export interface TransportLeg {
+  id: string;
+  origin_destination_id: string;
+  destination_destination_id: string;
+  mode: "flight" | "train" | "bus" | "metro" | "cab" | "walk";
+  route_status: "REACHABLE" | "UNREACHABLE" | "UNKNOWN";
+  duration_minutes: Fact;
+  distance_km: string | null;
+  depart_at: string | null;
+  arrive_at: string | null;
+  source_provider: string | null;
+  retrieved_at: string | null;
+  expires_at: string | null;
+  evidence_ids: string[];
+  expense_ids: string[];
+}
+
 export interface Trip {
   id: string;
   owner_id: string;
@@ -109,6 +161,12 @@ export interface Trip {
   brief: TripBrief;
   preferences: TravelerPreferences;
   budget: Budget;
+  destination_ids: string[];
+  day_ids: string[];
+  destinations: Destination[];
+  days: TripDay[];
+  transport_legs: TransportLeg[];
+  radius_km: string;
   readiness: TripReadiness;
 }
 

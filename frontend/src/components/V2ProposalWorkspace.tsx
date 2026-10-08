@@ -3,6 +3,8 @@ import { getV2Budget, getV2Trip } from '../api'
 import type { BudgetView, TripVersion } from '../types/v2'
 import BudgetBreakdown from './BudgetBreakdown'
 import TripProposalPanel from './TripProposalPanel'
+import MapPanel from './MapPanel'
+import ScheduledTimeline from './ScheduledTimeline'
 
 interface V2ProposalWorkspaceProps {
   tripId: string
@@ -12,6 +14,7 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
   const [trip, setTrip] = useState<TripVersion | null>(null)
   const [budget, setBudget] = useState<BudgetView | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [selectedDestinationId, setSelectedDestinationId] = useState<string | null>(null)
 
   useEffect(() => {
     let active = true
@@ -29,7 +32,7 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
   }, [tripId, trip?.version])
 
   return (
-    <main className="relative z-20 mx-auto flex h-screen w-full max-w-3xl items-center px-6 py-12 text-white">
+    <main className="relative z-20 mx-auto h-screen w-full max-w-7xl overflow-y-auto px-6 py-12 text-white">
       <section className="w-full rounded-3xl border border-white/10 bg-slate-950/80 p-6 shadow-[0_0_60px_rgba(34,211,238,0.12)] backdrop-blur-xl">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Versioned trip workspace</p>
         {error && <p className="mt-4 rounded-xl border border-rose-400/30 bg-rose-950/40 p-3 text-sm text-rose-200">{error}</p>}
@@ -40,8 +43,14 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
               <h1 className="text-2xl font-semibold">{trip.trip.title}</h1>
               <p className="mt-1 font-mono text-xs text-slate-400">Accepted version {trip.version}</p>
             </div>
-            {budget && <BudgetBreakdown view={budget} />}
-            <TripProposalPanel tripId={trip.trip_id} version={trip.version} onCommitted={setTrip} />
+            <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
+              <div className="space-y-6">
+                {trip.trip.days.length > 0 && <ScheduledTimeline days={trip.trip.days} selectedDestinationId={selectedDestinationId} onSelectDestination={setSelectedDestinationId} />}
+                {budget && <BudgetBreakdown view={budget} />}
+                <TripProposalPanel tripId={trip.trip_id} version={trip.version} onCommitted={setTrip} />
+              </div>
+              <MapPanel destinations={trip.trip.destinations} selectedDestinationId={selectedDestinationId} onSelect={setSelectedDestinationId} />
+            </div>
           </div>
         )}
       </section>
