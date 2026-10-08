@@ -41,6 +41,14 @@ class Provenance(StrEnum):
     LEGACY = "LEGACY"
 
 
+class ProviderOutcomeStatus(StrEnum):
+    SUCCESS = "SUCCESS"
+    NO_RESULTS = "NO_RESULTS"
+    UNAVAILABLE = "UNAVAILABLE"
+    ERROR = "ERROR"
+    MOCK = "MOCK"
+
+
 class TripReadiness(StrEnum):
     DRAFT = "DRAFT"
     ACTION_REQUIRED = "ACTION_REQUIRED"
@@ -59,6 +67,21 @@ class Evidence(DomainModel):
     expires_at: datetime | None = None
     covered_fields: tuple[str, ...] = ()
     provenance: Provenance
+    provider_outcome: ProviderOutcomeStatus = ProviderOutcomeStatus.SUCCESS
+    retention_permitted: bool = True
+    retention_until: datetime | None = None
+
+    @model_validator(mode="after")
+    def check_retention(self) -> "Evidence":
+        if not self.retention_permitted and self.retention_until is not None:
+            raise ValueError("Non-retainable evidence cannot have a retention deadline")
+        if self.retention_until and self.retention_until < self.retrieved_at:
+            raise ValueError("Evidence retention cannot end before retrieval")
+        if self.provider_outcome is ProviderOutcomeStatus.MOCK and self.provenance is not Provenance.MOCK:
+            raise ValueError("Mock provider outcomes require mock provenance")
+        if self.provenance is Provenance.MOCK and self.provider_outcome is not ProviderOutcomeStatus.MOCK:
+            raise ValueError("Mock provenance requires an explicit mock provider outcome")
+        return self
 
 
 class Fact(DomainModel):
@@ -70,7 +93,7 @@ class Fact(DomainModel):
 
 class Money(DomainModel):
     # Currency-specific rounding is applied by pricing policy, not by storage.
-    amount: Decimal
+    amount: Decimal | None
     currency: CurrencyCode
     status: PriceStatus
     provenance: Provenance
@@ -78,10 +101,26 @@ class Money(DomainModel):
 
     @field_validator("amount")
     @classmethod
-    def reject_non_finite(cls, value: Decimal) -> Decimal:
+    def reject_non_finite(cls, value: Decimal | None) -> Decimal | None:
+        if value is None:
+            return None
         if not value.is_finite():
             raise ValueError("Money amount must be finite")
+        if value < 0:
+            raise ValueError("Money amount must be nonnegative")
         return value
+
+    @model_validator(mode="after")
+    def unknowns_are_not_zero(self) -> "Money":
+        if self.status is PriceStatus.UNKNOWN and self.amount is not None:
+            raise ValueError("Unknown money must not carry a fabricated amount")
+        if self.status is not PriceStatus.UNKNOWN and self.amount is None:
+            raise ValueError("Known money requires an amount")
+        if self.status is PriceStatus.VERIFIED and self.provenance is not Provenance.LIVE:
+            raise ValueError("Only live provider money can be verified")
+        if self.status is PriceStatus.VERIFIED and not self.evidence_ids:
+            raise ValueError("Verified money requires field evidence")
+        return self
 
 
 class TripBrief(DomainModel):
@@ -177,18 +216,85 @@ class TransportLeg(DomainModel):
     expense_ids: tuple[OpaqueId, ...] = ()
 
 
+class FxSnapshot(DomainModel):
+    base_currency: CurrencyCode
+    quote_currency: CurrencyCode
+    rate: Decimal = Field(gt=0)
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    evidence_id: OpaqueId | None = None
+
+
 class Expense(DomainModel):
     id: OpaqueId = Field(default_factory=lambda: new_id("expense"))
     category: Literal["flight", "hotel", "transport", "food", "activity", "tax", "contingency"]
     money: Money
-    quantity: Decimal = Decimal("1")
+    unit: Literal["item", "person", "night", "room", "leg", "trip"] = "item"
+    quantity: Decimal = Field(default=Decimal("1"), gt=0)
+    taxes: tuple[Money, ...] = ()
+    taxes_included: bool = False
+    exclusions: tuple[str, ...] = ()
     included: bool = False
+    mandatory: bool = True
+    fx_snapshot: FxSnapshot | None = None
+
+    @model_validator(mode="after")
+    def validate_currency_scope(self) -> "Expense":
+        if any(tax.currency != self.money.currency for tax in self.taxes):
+            raise ValueError("Expense taxes must use the native expense currency")
+        return self
+class BudgetFeasibility(StrEnum):
+    WITHIN_BUDGET = "WITHIN_BUDGET"
+    OVER_BUDGET = "OVER_BUDGET"
+    UNKNOWN = "UNKNOWN"
+
+
+class BudgetBreakdown(DomainModel):
+    currency: CurrencyCode
+    verified_subtotal: Decimal
+    estimated_subtotal: Decimal
+    user_provided_subtotal: Decimal
+    taxes_total: Decimal
+    contingency_total: Decimal
+    known_total: Decimal
+    unknown_expense_ids: tuple[OpaqueId, ...] = ()
+    mandatory_unknown_expense_ids: tuple[OpaqueId, ...] = ()
+    feasibility: BudgetFeasibility
+    shortfall: Decimal | None = None
 
 
 class Budget(DomainModel):
     id: OpaqueId = Field(default_factory=lambda: new_id("budget"))
     target: Money
     expense_ids: tuple[OpaqueId, ...] = ()
+    expenses: tuple[Expense, ...] = ()
+    evidence: tuple[Evidence, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_expense_ids(cls, value: object) -> object:
+        if isinstance(value, dict) and value.get("expenses"):
+            value = dict(value)
+            expenses: list[Expense | dict] = []
+            for item in value["expenses"]:
+                if isinstance(item, Expense):
+                    expenses.append(item)
+                else:
+                    expense = dict(item)
+                    expense.setdefault("id", new_id("expense"))
+                    expenses.append(expense)
+            value["expenses"] = tuple(expenses)
+            if not value.get("expense_ids"):
+                value["expense_ids"] = tuple(item.id if isinstance(item, Expense) else item["id"] for item in expenses)
+        return value
+
+    @model_validator(mode="after")
+    def reconcile_references(self) -> "Budget":
+        ids = tuple(expense.id for expense in self.expenses)
+        if len(ids) != len(set(ids)):
+            raise ValueError("Budget contains duplicate expenses")
+        if self.expense_ids and self.expense_ids != ids:
+            raise ValueError("Budget expense_ids must match ordered expenses")
+        return self
 
 
 class Alternative(DomainModel):
@@ -232,6 +338,27 @@ class Trip(DomainModel):
     destination_ids: tuple[OpaqueId, ...] = ()
     day_ids: tuple[OpaqueId, ...] = ()
     readiness: TripReadiness = TripReadiness.DRAFT
+
+    @model_validator(mode="after")
+    def ready_trip_has_complete_budget(self) -> "Trip":
+        if self.readiness is TripReadiness.READY_TO_BOOK:
+            if any(
+                expense.mandatory
+                and (
+                    expense.money.status is PriceStatus.UNKNOWN
+                    or any(tax.status is PriceStatus.UNKNOWN for tax in expense.taxes)
+                    or (expense.money.currency != self.budget.target.currency and expense.fx_snapshot is None)
+                )
+                for expense in self.budget.expenses
+            ):
+                raise ValueError("A mandatory unknown cost blocks READY_TO_BOOK")
+            if any(
+                expense.money.provenance is Provenance.MOCK
+                or any(tax.provenance is Provenance.MOCK for tax in expense.taxes)
+                for expense in self.budget.expenses
+            ):
+                raise ValueError("Mock costs cannot produce READY_TO_BOOK")
+        return self
 
 
 class TripVersion(DomainModel):

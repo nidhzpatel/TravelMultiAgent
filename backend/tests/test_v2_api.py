@@ -18,6 +18,7 @@ class V2ApiTests(unittest.TestCase):
         app.dependency_overrides[get_repository] = lambda: self.repository
         app.dependency_overrides[current_principal] = lambda: Principal(subject="user_alice")
         self.client = TestClient(app)
+        self.app = app
         self.headers = {}
 
     def _payload(self) -> dict:
@@ -90,6 +91,38 @@ class V2ApiTests(unittest.TestCase):
         self.assertEqual(committed.status_code, 200)
         self.assertEqual(committed.json()["version"], 1)
         self.assertIsNone(self.repository.get_version(trip_id, 2))
+
+    def test_budget_endpoint_and_export_share_the_canonical_ledger(self) -> None:
+        payload = self._payload()
+        payload["budget"]["expenses"] = [
+            {
+                "category": "hotel",
+                "money": {"amount": "1200", "currency": "USD", "status": "ESTIMATED", "provenance": "LIVE"},
+                "quantity": "2",
+                "unit": "night",
+            },
+            {
+                "category": "transport",
+                "money": {"amount": None, "currency": "USD", "status": "UNKNOWN", "provenance": "LIVE"},
+                "mandatory": True,
+            },
+        ]
+        created = self.client.post("/v2/trips", json=payload)
+        self.assertEqual(created.status_code, 201)
+        trip_id = created.json()["trip_id"]
+        budget = self.client.get(f"/v2/trips/{trip_id}/budget")
+        exported = self.client.get(f"/v2/trips/{trip_id}/export")
+        pdf = self.client.get(f"/v2/trips/{trip_id}/budget.pdf")
+        self.assertEqual(budget.status_code, 200)
+        self.assertEqual(budget.json()["breakdown"]["known_total"], "2400.00")
+        self.assertEqual(budget.json()["breakdown"]["feasibility"], "UNKNOWN")
+        self.assertEqual(budget.json()["expenses"], exported.json()["trip"]["budget"]["expenses"])
+        self.assertEqual(pdf.status_code, 200)
+        self.assertTrue(pdf.content.startswith(b"%PDF"))
+        self.assertIn(b"Known total: USD 2400.00", pdf.content)
+        self.app.dependency_overrides[current_principal] = lambda: Principal(subject="user_bob")
+        self.assertEqual(self.client.get(f"/v2/trips/{trip_id}/budget").status_code, 404)
+        self.assertEqual(self.client.get(f"/v2/trips/{trip_id}/budget.pdf").status_code, 404)
 
 
 if __name__ == "__main__":

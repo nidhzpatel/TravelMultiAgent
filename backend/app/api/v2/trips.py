@@ -3,10 +3,12 @@ from __future__ import annotations
 from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fpdf import FPDF
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
-from app.domain.contracts import Budget, Trip, TripBrief, TripVersion, TravelerPreferences, new_id
+from app.domain.contracts import Budget, BudgetBreakdown, Evidence, Expense, Trip, TripBrief, TripVersion, TravelerPreferences, new_id
+from app.planning.budget import build_budget_breakdown
 from app.persistence.repositories import SqlAlchemyTripRepository
 from app.security.identity import Principal, current_principal, enforce_rate_limit
 from app.security.sessions import create_session
@@ -36,6 +38,13 @@ class TripMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str = Field(min_length=1, max_length=2000)
     idempotency_key: str = Field(min_length=16, max_length=255)
+
+
+class BudgetView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    breakdown: BudgetBreakdown
+    expenses: tuple[Expense, ...]
+    evidence: tuple[Evidence, ...]
 
 
 def _proposal_response(trip_repository: SqlAlchemyTripRepository, proposal) -> dict:
@@ -136,6 +145,59 @@ def export_trip(
     if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
     return trip
+
+
+@router.get("/{trip_id}/budget", response_model=BudgetView)
+def get_trip_budget(
+    trip_id: str,
+    principal: Principal = Depends(current_principal),
+    trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
+) -> BudgetView:
+    trip = trip_repository.get(trip_id)
+    if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    return BudgetView(
+        breakdown=build_budget_breakdown(trip.trip.budget),
+        expenses=trip.trip.budget.expenses,
+        evidence=trip.trip.budget.evidence,
+    )
+
+
+@router.get("/{trip_id}/budget.pdf", response_class=Response)
+def export_trip_budget_pdf(
+    trip_id: str,
+    principal: Principal = Depends(current_principal),
+    trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
+) -> Response:
+    trip = trip_repository.get(trip_id)
+    if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    breakdown = build_budget_breakdown(trip.trip.budget)
+    pdf = FPDF()
+    pdf.set_compression(False)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    safe_title = trip.trip.title.encode("latin-1", errors="replace").decode("latin-1")
+    pdf.cell(0, 10, f"{safe_title} - Budget", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=11)
+    rows = (
+        ("Verified", breakdown.verified_subtotal),
+        ("Estimated", breakdown.estimated_subtotal),
+        ("User provided", breakdown.user_provided_subtotal),
+        ("Taxes", breakdown.taxes_total),
+        ("Contingency", breakdown.contingency_total),
+        ("Known total", breakdown.known_total),
+    )
+    for label, amount in rows:
+        pdf.cell(0, 7, f"{label}: {breakdown.currency} {amount}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 7, f"Feasibility: {breakdown.feasibility.value}", new_x="LMARGIN", new_y="NEXT")
+    if breakdown.mandatory_unknown_expense_ids:
+        pdf.multi_cell(0, 7, "Mandatory costs remain unknown; the known total does not establish budget feasibility.")
+    return Response(
+        content=bytes(pdf.output()),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{trip_id}-budget.pdf"'},
+    )
 
 
 @router.post("/{trip_id}/messages")

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { getV2Trip } from '../api'
-import type { TripVersion } from '../types/v2'
+import { getV2Budget, getV2Trip } from '../api'
+import type { BudgetView, TripVersion } from '../types/v2'
+import BudgetBreakdown from './BudgetBreakdown'
 import TripProposalPanel from './TripProposalPanel'
 
 interface V2ProposalWorkspaceProps {
@@ -9,6 +10,7 @@ interface V2ProposalWorkspaceProps {
 
 export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps) {
   const [trip, setTrip] = useState<TripVersion | null>(null)
+  const [budget, setBudget] = useState<BudgetView | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -18,6 +20,13 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
       .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : 'Unable to load trip') })
     return () => { active = false }
   }, [tripId])
+
+  useEffect(() => {
+    if (!trip) return
+    let active = true
+    getV2Budget(tripId).then((value) => { if (active) setBudget(value) }).catch(() => { if (active) setBudget(null) })
+    return () => { active = false }
+  }, [tripId, trip?.version])
 
   return (
     <main className="relative z-20 mx-auto flex h-screen w-full max-w-3xl items-center px-6 py-12 text-white">
@@ -31,6 +40,7 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
               <h1 className="text-2xl font-semibold">{trip.trip.title}</h1>
               <p className="mt-1 font-mono text-xs text-slate-400">Accepted version {trip.version}</p>
             </div>
+            {budget && <BudgetBreakdown view={budget} />}
             <TripProposalPanel tripId={trip.trip_id} version={trip.version} onCommitted={setTrip} />
           </div>
         )}

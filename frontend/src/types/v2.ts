@@ -6,11 +6,76 @@ export type Provenance = "LIVE" | "MOCK" | "USER" | "LEGACY";
 export type TripReadiness = "DRAFT" | "ACTION_REQUIRED" | "READY_TO_BOOK";
 
 export interface Money {
-  amount: string;
+  amount: string | null;
   currency: string;
   status: PriceStatus;
   provenance: Provenance;
   evidence_ids: string[];
+}
+
+export type ProviderOutcomeStatus = "SUCCESS" | "NO_RESULTS" | "UNAVAILABLE" | "ERROR" | "MOCK";
+
+export interface Evidence {
+  id: string;
+  source: string;
+  reference_url: string | null;
+  retrieved_at: string;
+  expires_at: string | null;
+  covered_fields: string[];
+  provenance: Provenance;
+  provider_outcome: ProviderOutcomeStatus;
+  retention_permitted: boolean;
+  retention_until: string | null;
+}
+
+export interface FxSnapshot {
+  base_currency: string;
+  quote_currency: string;
+  rate: string;
+  captured_at: string;
+  evidence_id: string | null;
+}
+
+export interface Expense {
+  id: string;
+  category: "flight" | "hotel" | "transport" | "food" | "activity" | "tax" | "contingency";
+  money: Money;
+  unit: "item" | "person" | "night" | "room" | "leg" | "trip";
+  quantity: string;
+  taxes: Money[];
+  taxes_included: boolean;
+  exclusions: string[];
+  included: boolean;
+  mandatory: boolean;
+  fx_snapshot: FxSnapshot | null;
+}
+
+export interface Budget {
+  id: string;
+  target: Money;
+  expense_ids: string[];
+  expenses: Expense[];
+  evidence: Evidence[];
+}
+
+export interface BudgetBreakdown {
+  currency: string;
+  verified_subtotal: string;
+  estimated_subtotal: string;
+  user_provided_subtotal: string;
+  taxes_total: string;
+  contingency_total: string;
+  known_total: string;
+  unknown_expense_ids: string[];
+  mandatory_unknown_expense_ids: string[];
+  feasibility: "WITHIN_BUDGET" | "OVER_BUDGET" | "UNKNOWN";
+  shortfall: string | null;
+}
+
+export interface BudgetView {
+  breakdown: BudgetBreakdown;
+  expenses: Expense[];
+  evidence: Evidence[];
 }
 
 export interface Fact {
@@ -43,6 +108,7 @@ export interface Trip {
   title: string;
   brief: TripBrief;
   preferences: TravelerPreferences;
+  budget: Budget;
   readiness: TripReadiness;
 }
 
