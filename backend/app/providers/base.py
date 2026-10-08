@@ -1,8 +1,9 @@
 """Provider boundary shared by production adapters."""
 
+from datetime import datetime, timezone
 from typing import Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.contracts import Evidence, ProviderOutcomeStatus
 
@@ -25,3 +26,22 @@ class ProviderResult(BaseModel, Generic[T]):
         if self.status is ProviderOutcomeStatus.ERROR and not self.error_code:
             raise ValueError("Provider errors require an error code")
         return self
+
+
+class ProviderCapabilities(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    live: bool
+    search: bool = False
+    weather: bool = False
+    flights: bool = False
+    hotels: bool = False
+    booking_handoff: bool = False
+    supported_markets: tuple[str, ...] = ()
+    max_forecast_days: int | None = None
+
+
+class ProviderMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider: str
+    retrieved_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    reference: str | None = None
