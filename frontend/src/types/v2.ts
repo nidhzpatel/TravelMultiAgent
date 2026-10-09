@@ -177,6 +177,59 @@ export interface TripVersion {
   trip: Trip;
 }
 
+export type PlanningJobStatus =
+  | "QUEUED"
+  | "RUNNING"
+  | "RETRY_WAIT"
+  | "NEEDS_INPUT"
+  | "SUCCEEDED"
+  | "FAILED"
+  | "CANCELLED"
+  | "EXPIRED";
+
+export interface PlanningJobRequest {
+  idempotency_key: string;
+  deadline_seconds?: number;
+  max_attempts?: number;
+  token_budget?: number;
+  cost_budget_usd?: string;
+}
+
+export interface PlanningJob {
+  id: string;
+  trip_id: string;
+  owner_id: string;
+  base_version: number;
+  status: PlanningJobStatus;
+  attempt_count: number;
+  max_attempts: number;
+  fencing_token: number;
+  lease_owner: string | null;
+  lease_expires_at: string | null;
+  next_attempt_at: string | null;
+  deadline_at: string;
+  cancel_requested: boolean;
+  checkpoint: Record<string, unknown>;
+  result_version: number | null;
+  error_code: string | null;
+  token_budget: number;
+  tokens_used: number;
+  cost_budget_usd: string;
+  cost_used_usd: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlanningJobEvent {
+  job_id: string;
+  sequence: number;
+  event_type: string;
+  message: string;
+  progress_percent: number;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface Operation {
   kind: "READ" | "ADD" | "REMOVE" | "REPLACE" | "MOVE" | "REORDER" | "REPLAN";
   target_id?: string | null;

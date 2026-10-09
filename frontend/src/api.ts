@@ -8,7 +8,7 @@ import type {
   ChatMessageResponse,
   ChatSession,
 } from './types'
-import type { BudgetView, ProposalPreview, ProposalRequest, ProviderDataView, TripVersion } from './types/v2'
+import type { BudgetView, PlanningJob, PlanningJobEvent, PlanningJobRequest, ProposalPreview, ProposalRequest, ProviderDataView, TripVersion } from './types/v2'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -148,4 +148,34 @@ export async function commitTripProposal(tripId: string, proposalId: string): Pr
   const res = await fetch(`${API_BASE}/v2/trips/${tripId}/proposals/${proposalId}/commit`, { method: 'POST', credentials: 'include', headers: { 'X-CSRF-Token': csrfToken() } })
   if (!res.ok) throw new Error((await res.text()) || 'Failed to apply change')
   return res.json() as Promise<TripVersion>
+}
+
+export async function createPlanningJob(tripId: string, request: PlanningJobRequest): Promise<PlanningJob> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}/planning-jobs`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() }, body: JSON.stringify(request) })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to start planning')
+  return res.json() as Promise<PlanningJob>
+}
+
+export async function listPlanningJobs(tripId: string): Promise<PlanningJob[]> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}/planning-jobs`, { credentials: 'include' })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to load planning jobs')
+  return res.json() as Promise<PlanningJob[]>
+}
+
+export async function getPlanningJob(tripId: string, jobId: string): Promise<PlanningJob> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}/planning-jobs/${jobId}`, { credentials: 'include' })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to load planning status')
+  return res.json() as Promise<PlanningJob>
+}
+
+export async function getPlanningJobEvents(tripId: string, jobId: string, after = 0): Promise<PlanningJobEvent[]> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}/planning-jobs/${jobId}/events?after=${after}`, { credentials: 'include' })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to load planning progress')
+  return res.json() as Promise<PlanningJobEvent[]>
+}
+
+export async function cancelPlanningJob(tripId: string, jobId: string): Promise<PlanningJob> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}/planning-jobs/${jobId}/cancel`, { method: 'POST', credentials: 'include', headers: { 'X-CSRF-Token': csrfToken() } })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to cancel planning')
+  return res.json() as Promise<PlanningJob>
 }

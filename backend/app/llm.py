@@ -7,8 +7,9 @@ Ollama model. Without a key, Ollama is used directly.
 """
 
 import logging
+from decimal import Decimal
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any, Callable, Generic, Optional, TypeVar
 
 from langchain_core.callbacks import CallbackManagerForLLMRun, AsyncCallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -17,8 +18,47 @@ from langchain_core.outputs import ChatResult
 from langchain_community.chat_models import ChatOllama
 
 from app.config import get_settings
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 logger = logging.getLogger(__name__)
+StructuredT = TypeVar("StructuredT", bound=BaseModel)
+
+
+class ModelSchemaError(Exception):
+    pass
+
+
+class ModelBudgetExceeded(Exception):
+    pass
+
+
+class StructuredModelResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    payload: dict[str, object]
+    tokens_used: int = Field(ge=0)
+    cost_usd: Decimal = Field(ge=0)
+
+
+class BoundedStructuredModel(Generic[StructuredT]):
+    """Request-local structured call with a single rate-limit fallback."""
+
+    def __init__(self, primary: Callable[[str], StructuredModelResult], fallback: Callable[[str], StructuredModelResult] | None = None) -> None:
+        self.primary = primary
+        self.fallback = fallback
+
+    def invoke(self, prompt: str, schema: type[StructuredT], token_budget: int, cost_budget_usd: Decimal) -> tuple[StructuredT, int, Decimal]:
+        try:
+            raw = self.primary(prompt)
+        except Exception as exc:
+            if not _is_rate_limit(exc) or self.fallback is None:
+                raise
+            raw = self.fallback(prompt)
+        if raw.tokens_used > token_budget or raw.cost_usd > cost_budget_usd:
+            raise ModelBudgetExceeded("Structured model response exceeded its request budget")
+        try:
+            return schema.model_validate(raw.payload), raw.tokens_used, raw.cost_usd
+        except ValidationError as exc:
+            raise ModelSchemaError("Structured model response failed schema validation") from exc
 
 
 def _is_rate_limit(exc: Exception) -> bool:

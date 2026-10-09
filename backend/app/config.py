@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     flight_provider_token: str = ""
     hotel_provider_url: str = ""
     hotel_provider_token: str = ""
+    planning_worker_lease_seconds: int = 30
+    planning_worker_poll_seconds: float = 1.0
 
     # Required by the v2 persistence/API path. Production validation is added in P2.
     database_url: str = ""

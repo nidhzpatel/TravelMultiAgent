@@ -26,7 +26,14 @@ Versioned, evidence-aware travel planning workspace with a legacy CrewAI planner
    npm run dev
    ```
 
-4. Open http://localhost:5173 and submit a travel request.
+4. Start the v2 planning worker in another shell when using planning jobs:
+   ```bash
+   cd backend
+   source .venv/bin/activate
+   python -m app.workers.run
+   ```
+
+5. Open http://localhost:5173 and submit a travel request.
 
 ## Architecture
 
@@ -36,6 +43,8 @@ The repository currently contains two paths:
 - The v2 workspace stores immutable trip versions, validates typed edits, preserves provider evidence, and keeps unknown or unavailable facts explicit.
 
 The v2 provider boundary uses typed Search, Weather, Flight, and Hotel adapters. Development fixtures are visibly marked `MOCK`; production configuration never falls back to them. Serper and Open-Meteo have live adapters. Flight and hotel inventory use configured aggregator endpoints and remain explicitly unavailable when credentials are absent.
+
+Initial v2 planning runs as durable background work. The API queues an idempotent job and returns immediately; a separate worker uses leases, fencing tokens, deadlines, retries, cancellation, progress events, model budgets, and an atomic trip-version commit. The workspace shows live progress and explicit success, needs-input, failure, cancellation, and expiry states.
 
 The legacy planner works as follows:
 
@@ -59,6 +68,10 @@ The legacy planner works as follows:
 - `POST /v2/trips/{id}/proposals/{proposal_id}/commit` — commit a validated proposal
 - `GET /v2/trips/{id}/provider-data` — read version-pinned provider evidence and alternatives
 - `POST /v2/trips/{id}/provider-data/refresh` — run explicitly configured provider requests
+- `POST /v2/trips/{id}/planning-jobs` — enqueue an idempotent planning job (HTTP 202)
+- `GET /v2/trips/{id}/planning-jobs/{job_id}` — read job state
+- `GET /v2/trips/{id}/planning-jobs/{job_id}/events` — read ordered progress events
+- `POST /v2/trips/{id}/planning-jobs/{job_id}/cancel` — request cancellation
 
 ## Tech Stack
 

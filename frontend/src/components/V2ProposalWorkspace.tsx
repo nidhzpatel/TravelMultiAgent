@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { getV2Budget, getV2ProviderData, getV2Trip } from '../api'
 import type { BudgetView, ProviderDataView, TripVersion } from '../types/v2'
 import AlternativeDrawer from './AlternativeDrawer'
@@ -8,6 +8,7 @@ import MapPanel from './MapPanel'
 import ScheduledTimeline from './ScheduledTimeline'
 import ProviderStatus from './ProviderStatus'
 import WeatherPanel from './WeatherPanel'
+import PlanningProgress from './PlanningProgress'
 
 interface V2ProposalWorkspaceProps {
   tripId: string
@@ -19,6 +20,10 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
   const [error, setError] = useState<string | null>(null)
   const [selectedDestinationId, setSelectedDestinationId] = useState<string | null>(null)
   const [providerData, setProviderData] = useState<ProviderDataView | null>(null)
+
+  const reloadTrip = useCallback(async () => {
+    setTrip(await getV2Trip(tripId))
+  }, [tripId])
 
   useEffect(() => {
     let active = true
@@ -54,6 +59,7 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
               <h1 className="text-2xl font-semibold">{trip.trip.title}</h1>
               <p className="mt-1 font-mono text-xs text-slate-400">Accepted version {trip.version}</p>
             </div>
+            <PlanningProgress tripId={tripId} onAccepted={reloadTrip} />
             <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
               <div className="space-y-6">
                 <ProviderStatus outcomes={providerData?.outcomes ?? []} />

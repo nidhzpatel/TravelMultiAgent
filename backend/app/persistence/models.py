@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -110,4 +111,48 @@ class ProviderRunRecord(Base):
     kind: Mapped[str] = mapped_column(String(24), nullable=False)
     provider: Mapped[str] = mapped_column(String(120), nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class PlanningJobRecord(Base):
+    __tablename__ = "planning_jobs"
+    __table_args__ = (UniqueConstraint("trip_id", "owner_id", "idempotency_key", name="uq_planning_jobs_trip_owner_key"),)
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    trip_id: Mapped[str] = mapped_column(ForeignKey("trips.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    checkpoint: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    result_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    token_budget: Mapped[int] = mapped_column(Integer, nullable=False)
+    tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    cost_used_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class PlanningJobEventRecord(Base):
+    __tablename__ = "planning_job_events"
+    __table_args__ = (UniqueConstraint("job_id", "sequence", name="uq_planning_job_events_sequence"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("planning_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    progress_percent: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
