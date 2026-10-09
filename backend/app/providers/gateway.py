@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.domain.contracts import ProviderOutcomeStatus
 from app.providers.base import ProviderResult
+from app.providers.base import ProviderCallError
 
 T = TypeVar("T")
 
@@ -38,6 +39,9 @@ class ProviderGateway(Generic[T]):
         except TimeoutError:
             future.cancel()
             return ProviderResult(status=ProviderOutcomeStatus.UNAVAILABLE, error_code="timeout")
+        except ProviderCallError as exc:
+            status = ProviderOutcomeStatus.UNAVAILABLE if exc.error_code in {"timeout", "provider_unavailable"} else ProviderOutcomeStatus.ERROR
+            return ProviderResult(status=status, error_code=exc.error_code)
         except Exception:
             return ProviderResult(status=ProviderOutcomeStatus.ERROR, error_code="provider_error")
         finally:

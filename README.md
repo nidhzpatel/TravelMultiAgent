@@ -1,6 +1,6 @@
 # VoyageMind AI
 
-Deep-Agentic Autonomous Travel Planning System — MVP.
+Versioned, evidence-aware travel planning workspace with a legacy CrewAI planner and a production-oriented v2 API.
 
 ## Quick Start
 
@@ -30,7 +30,14 @@ Deep-Agentic Autonomous Travel Planning System — MVP.
 
 ## Architecture
 
-This MVP follows the design in `architecture-mvp.md`. It is a **hierarchical / parallel multi-agent travel planner** built with CrewAI and FastAPI:
+The repository currently contains two paths:
+
+- The legacy CrewAI planner builds conversational itineraries.
+- The v2 workspace stores immutable trip versions, validates typed edits, preserves provider evidence, and keeps unknown or unavailable facts explicit.
+
+The v2 provider boundary uses typed Search, Weather, Flight, and Hotel adapters. Development fixtures are visibly marked `MOCK`; production configuration never falls back to them. Serper and Open-Meteo have live adapters. Flight and hotel inventory use configured aggregator endpoints and remain explicitly unavailable when credentials are absent.
+
+The legacy planner works as follows:
 
 1. **Input Parser** extracts structured fields from free-text prompts.
 2. **Itinerary Architect** (supervisor) builds a day-by-day route skeleton.
@@ -47,13 +54,17 @@ This MVP follows the design in `architecture-mvp.md`. It is a **hierarchical / p
 - `POST /parse-prompt` — extract travel fields + missing list
 - `POST /plan` — generate a complete itinerary
 - `GET /plan/{session_id}/pdf` — download the itinerary as PDF
+- `POST /v2/trips` / `GET /v2/trips/{id}` — create and read immutable v2 trip snapshots
+- `POST /v2/trips/{id}/proposals` — preview a typed change
+- `POST /v2/trips/{id}/proposals/{proposal_id}/commit` — commit a validated proposal
+- `GET /v2/trips/{id}/provider-data` — read version-pinned provider evidence and alternatives
+- `POST /v2/trips/{id}/provider-data/refresh` — run explicitly configured provider requests
 
 ## Tech Stack
 
 - **FastAPI** backend
 - **CrewAI** multi-agent orchestration
 - **React + TypeScript + Vite** frontend
-- **Serper** for live web search (flights, hotels, attractions)
-- Mocked external APIs (Amadeus, Booking, maps, E2B) with production hooks
-
-For the full enterprise design, see `architecture.md`.
+- **Serper** for live web search and **Open-Meteo** for supported forecasts
+- Configurable live flight and hotel aggregator adapters
+- Explicit development fixtures that cannot be selected in production

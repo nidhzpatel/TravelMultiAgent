@@ -8,7 +8,7 @@ import type {
   ChatMessageResponse,
   ChatSession,
 } from './types'
-import type { BudgetView, ProposalPreview, ProposalRequest, TripVersion } from './types/v2'
+import type { BudgetView, ProposalPreview, ProposalRequest, ProviderDataView, TripVersion } from './types/v2'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -136,6 +136,12 @@ export async function getV2Budget(tripId: string): Promise<BudgetView> {
   const res = await fetch(`${API_BASE}/v2/trips/${tripId}/budget`, { credentials: 'include' })
   if (!res.ok) throw new Error((await res.text()) || 'Failed to load budget')
   return res.json() as Promise<BudgetView>
+}
+
+export async function getV2ProviderData(tripId: string, version: number): Promise<ProviderDataView> {
+  const res = await fetch(`${API_BASE}/v2/trips/${tripId}/provider-data?version=${version}`, { credentials: 'include' })
+  if (!res.ok) throw new Error((await res.text()) || 'Failed to load provider data')
+  return res.json() as Promise<ProviderDataView>
 }
 
 export async function commitTripProposal(tripId: string, proposalId: string): Promise<TripVersion> {

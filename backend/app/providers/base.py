@@ -10,6 +10,12 @@ from app.domain.contracts import Evidence, ProviderOutcomeStatus
 T = TypeVar("T")
 
 
+class ProviderCallError(Exception):
+    def __init__(self, error_code: str) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
+
+
 class ProviderResult(BaseModel, Generic[T]):
     model_config = ConfigDict(extra="forbid", frozen=True)
     status: ProviderOutcomeStatus

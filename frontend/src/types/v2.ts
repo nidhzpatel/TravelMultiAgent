@@ -199,3 +199,44 @@ export interface ProposalPreview {
   changed_fields: string[];
   changes: Array<{ entity_id: string; fields: string[] }>;
 }
+
+export type ProviderItemKind = "SEARCH" | "WEATHER" | "FLIGHT" | "HOTEL";
+
+export interface NormalizedProviderItem {
+  id: string;
+  trip_id: string;
+  trip_version: number;
+  kind: ProviderItemKind;
+  provider: string;
+  provider_item_id: string;
+  title: string;
+  detail: string | null;
+  target_entity_id: string | null;
+  local_date: string | null;
+  starts_at: string | null;
+  ends_at: string | null;
+  price: Money | null;
+  availability: Fact | null;
+  reference_url: string | null;
+  handoff_url: string | null;
+  retrieved_at: string;
+  expires_at: string | null;
+  evidence: Evidence[];
+}
+
+export interface ProviderRun {
+  trip_id: string;
+  trip_version: number;
+  kind: ProviderItemKind;
+  provider: string;
+  status: ProviderOutcomeStatus;
+  error_code: string | null;
+  retrieved_at: string;
+}
+
+export interface ProviderDataView {
+  trip_id: string;
+  version: number;
+  items: NormalizedProviderItem[];
+  outcomes: ProviderRun[];
+}

@@ -25,6 +25,10 @@ class Settings(BaseSettings):
 
     # External API keys (only Serper is required for search tools)
     serper_api_key: str = ""
+    flight_provider_url: str = ""
+    flight_provider_token: str = ""
+    hotel_provider_url: str = ""
+    hotel_provider_token: str = ""
 
     # Required by the v2 persistence/API path. Production validation is added in P2.
     database_url: str = ""

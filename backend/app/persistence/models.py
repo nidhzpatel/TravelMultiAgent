@@ -79,3 +79,35 @@ class ProposalRecord(Base):
     preview: Mapped[dict] = mapped_column(JSON, nullable=False)
     committed_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class ProviderItemRecord(Base):
+    __tablename__ = "provider_items"
+    __table_args__ = (
+        UniqueConstraint("trip_id", "trip_version", "kind", "provider", "provider_item_id", name="uq_provider_items_identity"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    trip_id: Mapped[str] = mapped_column(ForeignKey("trips.id", ondelete="CASCADE"), nullable=False, index=True)
+    trip_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    provider: Mapped[str] = mapped_column(String(120), nullable=False)
+    provider_item_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class ProviderRunRecord(Base):
+    __tablename__ = "provider_runs"
+    __table_args__ = (
+        UniqueConstraint("trip_id", "trip_version", "kind", "provider", name="uq_provider_runs_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trip_id: Mapped[str] = mapped_column(ForeignKey("trips.id", ondelete="CASCADE"), nullable=False, index=True)
+    trip_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    provider: Mapped[str] = mapped_column(String(120), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)

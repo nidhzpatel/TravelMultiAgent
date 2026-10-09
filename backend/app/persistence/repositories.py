@@ -12,7 +12,8 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.contracts import Trip, TripVersion
-from app.persistence.models import Base, IdempotencyRecord, ProposalRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripVersionRecord, utcnow
+from app.persistence.models import Base, IdempotencyRecord, ProposalRecord, ProviderItemRecord, ProviderRunRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripVersionRecord, utcnow
+from app.providers.alternatives import NormalizedProviderItem, ProviderItemKind, ProviderRun
 
 
 class VersionConflictError(Exception):
@@ -210,6 +211,93 @@ class SqlAlchemyTripRepository:
             if proposal is None:
                 raise KeyError("Proposal not found")
             proposal.committed_version = version
+
+    def replace_provider_items(
+        self,
+        trip_id: str,
+        trip_version: int,
+        kind: ProviderItemKind,
+        provider: str,
+        items: tuple[NormalizedProviderItem, ...],
+    ) -> None:
+        if any(
+            item.trip_id != trip_id
+            or item.trip_version != trip_version
+            or item.kind != kind
+            or item.provider != provider
+            for item in items
+        ):
+            raise ValueError("Provider item scope does not match the replacement scope")
+        with self._session() as session:
+            current = session.scalars(
+                select(ProviderItemRecord).where(
+                    ProviderItemRecord.trip_id == trip_id,
+                    ProviderItemRecord.trip_version == trip_version,
+                    ProviderItemRecord.kind == kind.value,
+                )
+            ).all()
+            for record in current:
+                session.delete(record)
+            for item in items:
+                session.add(
+                    ProviderItemRecord(
+                        id=item.id,
+                        trip_id=trip_id,
+                        trip_version=trip_version,
+                        kind=kind.value,
+                        provider=provider,
+                        provider_item_id=item.provider_item_id,
+                        payload=item.model_dump(mode="json"),
+                        expires_at=item.expires_at,
+                    )
+                )
+
+    def list_provider_items(self, trip_id: str, trip_version: int) -> tuple[NormalizedProviderItem, ...]:
+        with self._session() as session:
+            payloads = session.scalars(
+                select(ProviderItemRecord.payload)
+                .where(
+                    ProviderItemRecord.trip_id == trip_id,
+                    ProviderItemRecord.trip_version == trip_version,
+                )
+                .order_by(ProviderItemRecord.kind, ProviderItemRecord.provider, ProviderItemRecord.provider_item_id)
+            ).all()
+        return tuple(NormalizedProviderItem.model_validate(payload) for payload in payloads)
+
+    def save_provider_run(self, run: ProviderRun) -> None:
+        with self._session() as session:
+            obsolete = session.scalars(
+                select(ProviderRunRecord).where(
+                    ProviderRunRecord.trip_id == run.trip_id,
+                    ProviderRunRecord.trip_version == run.trip_version,
+                    ProviderRunRecord.kind == run.kind.value,
+                    ProviderRunRecord.provider != run.provider,
+                )
+            ).all()
+            for item in obsolete:
+                session.delete(item)
+            record = session.scalar(
+                select(ProviderRunRecord).where(
+                    ProviderRunRecord.trip_id == run.trip_id,
+                    ProviderRunRecord.trip_version == run.trip_version,
+                    ProviderRunRecord.kind == run.kind.value,
+                    ProviderRunRecord.provider == run.provider,
+                )
+            )
+            payload = run.model_dump(mode="json")
+            if record:
+                record.payload = payload
+            else:
+                session.add(ProviderRunRecord(trip_id=run.trip_id, trip_version=run.trip_version, kind=run.kind.value, provider=run.provider, payload=payload))
+
+    def list_provider_runs(self, trip_id: str, trip_version: int) -> tuple[ProviderRun, ...]:
+        with self._session() as session:
+            payloads = session.scalars(
+                select(ProviderRunRecord.payload)
+                .where(ProviderRunRecord.trip_id == trip_id, ProviderRunRecord.trip_version == trip_version)
+                .order_by(ProviderRunRecord.kind, ProviderRunRecord.provider)
+            ).all()
+        return tuple(ProviderRun.model_validate(payload) for payload in payloads)
 
     @staticmethod
     def _fingerprint(payload: dict) -> str:

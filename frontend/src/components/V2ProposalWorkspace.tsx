@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
-import { getV2Budget, getV2Trip } from '../api'
-import type { BudgetView, TripVersion } from '../types/v2'
+import { getV2Budget, getV2ProviderData, getV2Trip } from '../api'
+import type { BudgetView, ProviderDataView, TripVersion } from '../types/v2'
+import AlternativeDrawer from './AlternativeDrawer'
 import BudgetBreakdown from './BudgetBreakdown'
 import TripProposalPanel from './TripProposalPanel'
 import MapPanel from './MapPanel'
 import ScheduledTimeline from './ScheduledTimeline'
+import ProviderStatus from './ProviderStatus'
+import WeatherPanel from './WeatherPanel'
 
 interface V2ProposalWorkspaceProps {
   tripId: string
@@ -15,6 +18,7 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
   const [budget, setBudget] = useState<BudgetView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selectedDestinationId, setSelectedDestinationId] = useState<string | null>(null)
+  const [providerData, setProviderData] = useState<ProviderDataView | null>(null)
 
   useEffect(() => {
     let active = true
@@ -28,6 +32,13 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
     if (!trip) return
     let active = true
     getV2Budget(tripId).then((value) => { if (active) setBudget(value) }).catch(() => { if (active) setBudget(null) })
+    return () => { active = false }
+  }, [tripId, trip?.version])
+
+  useEffect(() => {
+    if (!trip) return
+    let active = true
+    getV2ProviderData(tripId, trip.version).then((value) => { if (active) setProviderData(value) }).catch(() => { if (active) setProviderData(null) })
     return () => { active = false }
   }, [tripId, trip?.version])
 
@@ -45,11 +56,13 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
             </div>
             <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
               <div className="space-y-6">
+                <ProviderStatus outcomes={providerData?.outcomes ?? []} />
                 {trip.trip.days.length > 0 && <ScheduledTimeline days={trip.trip.days} selectedDestinationId={selectedDestinationId} onSelectDestination={setSelectedDestinationId} />}
+                <WeatherPanel forecasts={providerData?.items.filter((item) => item.kind === 'WEATHER') ?? []} />
                 {budget && <BudgetBreakdown view={budget} />}
                 <TripProposalPanel tripId={trip.trip_id} version={trip.version} onCommitted={setTrip} />
               </div>
-              <MapPanel destinations={trip.trip.destinations} selectedDestinationId={selectedDestinationId} onSelect={setSelectedDestinationId} />
+              <div className="space-y-6"><MapPanel destinations={trip.trip.destinations} selectedDestinationId={selectedDestinationId} onSelect={setSelectedDestinationId} /><AlternativeDrawer items={providerData?.items.filter((item) => item.kind !== 'WEATHER') ?? []} /></div>
             </div>
           </div>
         )}

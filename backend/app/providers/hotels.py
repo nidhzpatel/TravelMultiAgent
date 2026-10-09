@@ -31,15 +31,23 @@ class HotelOffer(BaseModel):
     place_id: str
     check_in: date
     check_out: date
-    rooms: int
-    adults: int
-    children: int
+    rooms: int = Field(ge=1, le=10)
+    adults: int = Field(ge=1, le=20)
+    children: int = Field(ge=0, le=20)
     rate_plan: str
     price: Money
     availability: Fact
     expires_at: datetime
     handoff_url: str | None = None
     evidence_ids: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def valid_offer(self) -> "HotelOffer":
+        if self.check_out <= self.check_in:
+            raise ValueError("Hotel offer checkout must follow check-in")
+        if self.expires_at.tzinfo is None:
+            raise ValueError("Hotel offer expiry must be timezone-aware")
+        return self
 
 
 class HotelProvider(Protocol):
