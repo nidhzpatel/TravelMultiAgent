@@ -9,6 +9,11 @@ import ScheduledTimeline from './ScheduledTimeline'
 import ProviderStatus from './ProviderStatus'
 import WeatherPanel from './WeatherPanel'
 import PlanningProgress from './PlanningProgress'
+import TripConversation from '../features/trips/TripConversation'
+import TripNavigation from '../features/trips/TripNavigation'
+import TripOverview from '../features/trips/TripOverview'
+import ReadinessPanel from '../features/trips/ReadinessPanel'
+import CollaborationPanel from '../features/trips/CollaborationPanel'
 
 interface V2ProposalWorkspaceProps {
   tripId: string
@@ -22,7 +27,9 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
   const [providerData, setProviderData] = useState<ProviderDataView | null>(null)
 
   const reloadTrip = useCallback(async () => {
-    setTrip(await getV2Trip(tripId))
+    const latest = await getV2Trip(tripId)
+    setTrip(latest)
+    setError(null)
   }, [tripId])
 
   useEffect(() => {
@@ -36,7 +43,7 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
   useEffect(() => {
     if (!trip) return
     let active = true
-    getV2Budget(tripId).then((value) => { if (active) setBudget(value) }).catch(() => { if (active) setBudget(null) })
+    getV2Budget(tripId, trip.version).then((value) => { if (active) setBudget(value) }).catch(() => { if (active) setBudget(null) })
     return () => { active = false }
   }, [tripId, trip?.version])
 
@@ -48,27 +55,26 @@ export default function V2ProposalWorkspace({ tripId }: V2ProposalWorkspaceProps
   }, [tripId, trip?.version])
 
   return (
-    <main className="relative z-20 mx-auto h-screen w-full max-w-7xl overflow-y-auto px-6 py-12 text-white">
+    <main className="relative z-20 mx-auto h-screen w-full max-w-[96rem] overflow-y-auto px-4 py-6 text-white sm:px-6">
       <section className="w-full rounded-3xl border border-white/10 bg-slate-950/80 p-6 shadow-[0_0_60px_rgba(34,211,238,0.12)] backdrop-blur-xl">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Versioned trip workspace</p>
         {error && <p className="mt-4 rounded-xl border border-rose-400/30 bg-rose-950/40 p-3 text-sm text-rose-200">{error}</p>}
         {!trip && !error && <p className="mt-4 text-sm text-slate-400">Loading accepted trip version…</p>}
         {trip && (
           <div className="mt-4 space-y-6">
-            <div>
-              <h1 className="text-2xl font-semibold">{trip.trip.title}</h1>
-              <p className="mt-1 font-mono text-xs text-slate-400">Accepted version {trip.version}</p>
-            </div>
+            <TripOverview trip={trip} />
             <PlanningProgress tripId={tripId} onAccepted={reloadTrip} />
-            <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
+            <TripNavigation days={trip.trip.days} destinations={trip.trip.destinations} selectedDestinationId={selectedDestinationId} onSelectDestination={setSelectedDestinationId} />
+            <div className="grid gap-6 xl:grid-cols-[20rem_minmax(0,1fr)_22rem]">
+              <TripConversation tripId={tripId} onCommitted={setTrip} onConflict={reloadTrip} />
               <div className="space-y-6">
                 <ProviderStatus outcomes={providerData?.outcomes ?? []} />
                 {trip.trip.days.length > 0 && <ScheduledTimeline days={trip.trip.days} selectedDestinationId={selectedDestinationId} onSelectDestination={setSelectedDestinationId} />}
                 <WeatherPanel forecasts={providerData?.items.filter((item) => item.kind === 'WEATHER') ?? []} />
                 {budget && <BudgetBreakdown view={budget} />}
-                <TripProposalPanel tripId={trip.trip_id} version={trip.version} onCommitted={setTrip} />
+                <TripProposalPanel tripId={trip.trip_id} version={trip.version} onCommitted={setTrip} onConflict={reloadTrip} />
               </div>
-              <div className="space-y-6"><MapPanel destinations={trip.trip.destinations} selectedDestinationId={selectedDestinationId} onSelect={setSelectedDestinationId} /><AlternativeDrawer items={providerData?.items.filter((item) => item.kind !== 'WEATHER') ?? []} /></div>
+              <div className="space-y-6"><ReadinessPanel trip={trip} budget={budget} /><CollaborationPanel tripId={tripId} /><MapPanel destinations={trip.trip.destinations} selectedDestinationId={selectedDestinationId} onSelect={setSelectedDestinationId} /><AlternativeDrawer items={providerData?.items.filter((item) => item.kind !== 'WEATHER') ?? []} /></div>
             </div>
           </div>
         )}

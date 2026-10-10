@@ -11,7 +11,7 @@ export default function BudgetBreakdown({ view }: BudgetBreakdownProps) {
   const amount = (value: string) => `${breakdown.currency} ${value}`
   return (
     <section className="space-y-4 rounded-2xl border border-white/10 bg-white/5 p-4" aria-label="Budget breakdown">
-      <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-300">Budget ledger</p><p className="mt-1 text-2xl font-semibold">{amount(breakdown.known_total)}</p></div><span className="rounded-full border border-white/15 px-2.5 py-1 text-xs text-slate-300">{breakdown.feasibility.replace(/_/g, ' ')}</span></div>
+      <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-300">Budget ledger</p><p className="mt-1 text-2xl font-semibold">{amount(breakdown.known_total)}</p><p className="mt-1 text-xs text-slate-400">of {view.target.currency} {view.target.amount ?? 'unknown'} target</p></div><span className="rounded-full border border-white/15 px-2.5 py-1 text-xs text-slate-300">{breakdown.feasibility.replace(/_/g, ' ')}</span></div>
       <dl className="grid grid-cols-2 gap-3 text-sm">
         <div><dt className="text-slate-400">Verified</dt><dd>{amount(breakdown.verified_subtotal)}</dd></div>
         <div><dt className="text-slate-400">Estimated</dt><dd>{amount(breakdown.estimated_subtotal)}</dd></div>

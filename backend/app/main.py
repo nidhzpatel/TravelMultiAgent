@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 from app.config import get_settings, validate_production_settings
 from app.security.middleware import CsrfMiddleware, SecurityHeadersMiddleware
 from app.security.logging import SecretRedactionFilter
+from app.observability.middleware import ObservabilityMiddleware
 
 logger.addFilter(SecretRedactionFilter())
 from app.schemas import (
@@ -115,6 +116,7 @@ app = FastAPI(
 app.include_router(v2_router)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CsrfMiddleware)
+app.add_middleware(ObservabilityMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

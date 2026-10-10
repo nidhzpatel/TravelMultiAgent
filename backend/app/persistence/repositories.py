@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.contracts import Trip, TripVersion
-from app.persistence.models import Base, IdempotencyRecord, ProposalRecord, ProviderItemRecord, ProviderRunRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripVersionRecord, utcnow
+from app.persistence.models import Base, IdempotencyRecord, ProposalRecord, ProviderItemRecord, ProviderRunRecord, RateLimitRecord, TripMemberRecord, TripRecord, TripShareRecord, TripVersionRecord, utcnow
 from app.providers.alternatives import NormalizedProviderItem, ProviderItemKind, ProviderRun
 
 
@@ -171,6 +171,70 @@ class SqlAlchemyTripRepository:
                 record.role = role
             else:
                 session.add(TripMemberRecord(trip_id=trip_id, user_id=user_id, role=role))
+
+    def list_members(self, trip_id: str) -> tuple[tuple[str, str], ...]:
+        with self._session() as session:
+            rows = session.execute(
+                select(TripMemberRecord.user_id, TripMemberRecord.role)
+                .where(TripMemberRecord.trip_id == trip_id)
+                .order_by(TripMemberRecord.created_at, TripMemberRecord.user_id)
+            ).all()
+        return tuple((user_id, role) for user_id, role in rows)
+
+    def remove_member(self, trip_id: str, user_id: str) -> bool:
+        with self._session() as session:
+            record = session.scalar(select(TripMemberRecord).where(TripMemberRecord.trip_id == trip_id, TripMemberRecord.user_id == user_id).with_for_update())
+            if record is None:
+                return False
+            if record.role == "OWNER":
+                raise ValueError("The trip owner cannot be removed")
+            session.delete(record)
+            return True
+
+    def create_share(self, record: TripShareRecord) -> None:
+        with self._session() as session:
+            session.add(record)
+
+    def list_shares(self, trip_id: str) -> tuple[TripShareRecord, ...]:
+        with self._session() as session:
+            return tuple(session.scalars(select(TripShareRecord).where(TripShareRecord.trip_id == trip_id).order_by(TripShareRecord.created_at.desc())).all())
+
+    def get_share(self, share_id: str) -> TripShareRecord | None:
+        with self._session() as session:
+            return session.get(TripShareRecord, share_id)
+
+    def revoke_share(self, share_id: str) -> TripShareRecord | None:
+        with self._session() as session:
+            record = session.scalar(select(TripShareRecord).where(TripShareRecord.id == share_id).with_for_update())
+            if record is None:
+                return None
+            if record.revoked_at is None:
+                record.revoked_at = utcnow()
+                if record.accepted_by:
+                    member = session.scalar(select(TripMemberRecord).where(TripMemberRecord.trip_id == record.trip_id, TripMemberRecord.user_id == record.accepted_by).with_for_update())
+                    if member is not None and member.role != "OWNER":
+                        session.delete(member)
+            session.flush()
+            return record
+
+    def accept_share(self, token_hash: str, user_id: str) -> tuple[str, str]:
+        with self._session() as session:
+            share = session.scalar(select(TripShareRecord).where(TripShareRecord.token_hash == token_hash).with_for_update())
+            if share is None:
+                raise KeyError("Share invitation not found")
+            expires_at = share.expires_at if share.expires_at.tzinfo else share.expires_at.replace(tzinfo=utcnow().tzinfo)
+            if share.revoked_at is not None or expires_at <= utcnow():
+                raise ValueError("Share invitation is no longer active")
+            if share.accepted_by not in {None, user_id}:
+                raise ValueError("Share invitation was already accepted")
+            member = session.scalar(select(TripMemberRecord).where(TripMemberRecord.trip_id == share.trip_id, TripMemberRecord.user_id == user_id).with_for_update())
+            if member is None:
+                session.add(TripMemberRecord(trip_id=share.trip_id, user_id=user_id, role=share.role))
+            elif member.role != "OWNER":
+                member.role = share.role
+            share.accepted_by = user_id
+            share.accepted_at = share.accepted_at or utcnow()
+            return share.trip_id, share.role
 
     def create_proposal(self, proposal_id: str, trip_id: str, owner_id: str, idempotency_key: str, base_version: int, payload: dict, preview: dict, idempotency_payload: dict | None = None) -> str:
         fingerprint = self._fingerprint(idempotency_payload if idempotency_payload is not None else payload)

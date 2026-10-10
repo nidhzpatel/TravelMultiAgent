@@ -33,6 +33,8 @@ jobs:
         run: python -m unittest discover -s backend/tests -v
       - name: Run offline evaluation regression fixture
         run: python backend/evaluation/run_regressions.py
+      - name: Run versioned quality benchmark
+        run: python backend/evaluation/run_quality_benchmark.py
 
   frontend:
     name: Frontend build
@@ -61,3 +63,47 @@ jobs:
         run: git show --check --oneline HEAD
       - name: Confirm public documentation policy
         run: test "$(git ls-tree -r --name-only HEAD | grep -E '\.md$' | wc -l | tr -d ' ')" = 1
+
+  containers:
+    name: Container builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build non-root backend image
+        uses: docker/build-push-action@v6
+        with: { context: backend, push: false, tags: voyagemind-api:${{ github.sha }} }
+      - name: Build non-root frontend image
+        uses: docker/build-push-action@v6
+        with: { context: frontend, push: false, tags: voyagemind-frontend:${{ github.sha }} }
+
+  supply-chain:
+    name: Dependency, secret, IaC and SBOM checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: '1.9.8' }
+      - name: Python dependency audit
+        run: python -m pip install pip-audit==2.9.0 && pip-audit -r backend/requirements-production.txt --strict
+      - name: Frontend production dependency audit
+        working-directory: frontend
+        run: npm ci && npm audit --omit=dev --audit-level=critical
+      - name: Secret and IaC scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with: { scan-type: fs, scan-ref: ., scanners: 'secret,misconfig', severity: CRITICAL, exit-code: '1' }
+      - name: Validate infrastructure
+        working-directory: infra/terraform
+        run: terraform fmt -check -recursive && terraform init -backend=false -input=false && terraform validate
+      - name: Generate source SBOM
+        uses: anchore/sbom-action@v0.17.2
+        with: { path: ., format: spdx-json, output-file: voyagemind.spdx.json }
+      - uses: actions/upload-artifact@v4
+        with: { name: source-sbom, path: voyagemind.spdx.json, retention-days: 30 }

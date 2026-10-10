@@ -8,7 +8,7 @@ from fpdf import FPDF
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
-from app.domain.contracts import Budget, BudgetBreakdown, Destination, Evidence, Expense, TransportLeg, Trip, TripBrief, TripDay, TripVersion, TravelerPreferences, new_id
+from app.domain.contracts import Budget, BudgetBreakdown, Destination, Evidence, Expense, Money, TransportLeg, Trip, TripBrief, TripDay, TripVersion, TravelerPreferences, new_id
 from app.planning.budget import build_budget_breakdown
 from app.persistence.repositories import SqlAlchemyTripRepository
 from app.security.identity import Principal, current_principal, enforce_rate_limit
@@ -17,6 +17,7 @@ from app.operations.contracts import ProposalRequest
 from app.operations.service import OperationValidationError, apply_operations, changed_fields, commit_replace
 from app.operations.intent import resolve_message
 from app.persistence.repositories import VersionConflictError
+from app.workers.export import VersionedExportWorker
 
 router = APIRouter(prefix="/v2/trips", tags=["v2 trips"], dependencies=[Depends(enforce_rate_limit)])
 
@@ -47,6 +48,7 @@ class TripMessageRequest(BaseModel):
 
 class BudgetView(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    target: Money
     breakdown: BudgetBreakdown
     expenses: tuple[Expense, ...]
     evidence: tuple[Evidence, ...]
@@ -145,23 +147,46 @@ def export_trip(
     principal: Principal = Depends(current_principal),
     trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
 ) -> TripVersion:
-    """Version-pinned structured export; PDF rendering moves to the export worker."""
+    """Return a version-pinned structured export."""
     trip = trip_repository.get_version(trip_id, version) if version else trip_repository.get(trip_id)
     if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
     return trip
 
 
+@router.get("/{trip_id}/export.pdf", response_class=Response)
+def export_trip_pdf(
+    trip_id: str,
+    version: int,
+    principal: Principal = Depends(current_principal),
+    trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
+) -> Response:
+    """Render exactly one accepted version with source and uncertainty labels."""
+    trip = trip_repository.get_version(trip_id, version)
+    if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip version not found")
+    content = VersionedExportWorker(trip_repository).render_pdf(trip_id, version)
+    if content is None:  # Defensive against a concurrent version deletion.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip version not found")
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{trip_id}-v{version}.pdf"'},
+    )
+
+
 @router.get("/{trip_id}/budget", response_model=BudgetView)
 def get_trip_budget(
     trip_id: str,
+    version: int | None = None,
     principal: Principal = Depends(current_principal),
     trip_repository: SqlAlchemyTripRepository = Depends(get_repository),
 ) -> BudgetView:
-    trip = trip_repository.get(trip_id)
+    trip = trip_repository.get_version(trip_id, version) if version is not None else trip_repository.get(trip_id)
     if trip is None or trip_repository.member_role(trip_id, principal.subject) not in {"OWNER", "EDITOR", "VIEWER"}:
         raise HTTPException(status_code=404, detail="Trip not found")
     return BudgetView(
+        target=trip.trip.budget.target,
         breakdown=build_budget_breakdown(trip.trip.budget),
         expenses=trip.trip.budget.expenses,
         evidence=trip.trip.budget.evidence,

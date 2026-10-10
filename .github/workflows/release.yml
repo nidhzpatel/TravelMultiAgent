@@ -1,0 +1,40 @@
+name: Qualified release
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+        required: true
+      evidence_json:
+        description: Dated release-qualification evidence JSON
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  qualify-and-publish:
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release evidence
+        env: { EVIDENCE_JSON: '${{ inputs.evidence_json }}' }
+        run: printf '%s' "$EVIDENCE_JSON" > "$RUNNER_TEMP/evidence.json" && python infra/scripts/qualify_release.py "$RUNNER_TEMP/evidence.json"
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: '${{ github.actor }}', password: '${{ secrets.GITHUB_TOKEN }}' }
+      - uses: docker/build-push-action@v6
+        id: api
+        with: { context: backend, push: true, tags: 'ghcr.io/${{ github.repository_owner }}/voyagemind-api:${{ github.sha }}' }
+      - uses: docker/build-push-action@v6
+        id: frontend
+        with: { context: frontend, push: true, tags: 'ghcr.io/${{ github.repository_owner }}/voyagemind-frontend:${{ github.sha }}' }
+      - uses: actions/attest-build-provenance@v2
+        with: { subject-name: 'ghcr.io/${{ github.repository_owner }}/voyagemind-api', subject-digest: '${{ steps.api.outputs.digest }}', push-to-registry: true }
+      - uses: actions/attest-build-provenance@v2
+        with: { subject-name: 'ghcr.io/${{ github.repository_owner }}/voyagemind-frontend', subject-digest: '${{ steps.frontend.outputs.digest }}', push-to-registry: true }

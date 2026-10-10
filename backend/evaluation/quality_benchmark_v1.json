@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "description": "Deterministic fixture benchmark; live provider quality is a separate release gate.",
+  "minimum_pass_rate": 1.0,
+  "cases": [
+    {"category": "groundedness", "test": "backend.tests.test_v4_budget.BudgetEngineTests.test_mock_cannot_be_verified_or_ready_to_book"},
+    {"category": "groundedness", "test": "backend.tests.test_v4_budget.BudgetEngineTests.test_stale_evidence_downgrades_verified_fact_and_price"},
+    {"category": "feasibility", "test": "backend.tests.test_v5_feasibility.FeasibilityPlannerTests.test_unknown_and_unreachable_routes_are_explicit_and_block_ready"},
+    {"category": "feasibility", "test": "backend.tests.test_v5_feasibility.FeasibilityPlannerTests.test_scheduler_respects_route_buffer_and_opening_window"},
+    {"category": "provider_safety", "test": "backend.tests.test_v6_providers.ProviderContractTests.test_no_inventory_and_rate_limit_remain_explicit_without_mock_fallback"},
+    {"category": "state_safety", "test": "backend.tests.test_v7_planning_jobs.PlanningJobTests.test_no_commit_after_base_version_change"}
+  ]
+}

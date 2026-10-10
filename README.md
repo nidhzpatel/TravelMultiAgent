@@ -46,6 +46,10 @@ The v2 provider boundary uses typed Search, Weather, Flight, and Hotel adapters.
 
 Initial v2 planning runs as durable background work. The API queues an idempotent job and returns immediately; a separate worker uses leases, fencing tokens, deadlines, retries, cancellation, progress events, model budgets, and an atomic trip-version commit. The workspace shows live progress and explicit success, needs-input, failure, cancellation, and expiry states.
 
+The v2 workspace uses conversation, timeline/cards, and map/context views of one accepted version. Budget/provider data and PDF exports are version-pinned, pending edits require explicit acceptance, and unknown facts remain visible. Owners can issue expiring one-time editor/viewer invitations and revoke the access granted by them.
+
+Production delivery assets live under `infra/`: non-root containers, PostgreSQL migrations, AWS ECS/RDS/S3/Secrets Manager/CloudWatch Terraform, backup/restore and rollback tooling, dependency/IaC/SBOM checks, and a fail-closed release qualification workflow. These assets require real staging, provider, recovery, and operational-owner evidence before a production release is qualified.
+
 The legacy planner works as follows:
 
 1. **Input Parser** extracts structured fields from free-text prompts.
@@ -72,6 +76,8 @@ The legacy planner works as follows:
 - `GET /v2/trips/{id}/planning-jobs/{job_id}` — read job state
 - `GET /v2/trips/{id}/planning-jobs/{job_id}/events` — read ordered progress events
 - `POST /v2/trips/{id}/planning-jobs/{job_id}/cancel` — request cancellation
+- `GET /v2/trips/{id}/export.pdf?version=N` — export an immutable accepted version with evidence/uncertainty labels
+- `GET /v2/trips/{id}/members` / `POST /v2/trips/{id}/shares` — owner-managed collaboration
 
 ## Tech Stack
 

@@ -1,0 +1,15 @@
+{
+  "title": "VoyageMind production",
+  "version": 1,
+  "panels": [
+    {"metric": "api_request_latency_p95", "unit": "milliseconds", "alert": 1500},
+    {"metric": "planning_queue_oldest_age", "unit": "seconds", "alert": 120},
+    {"metric": "planning_lease_reclaims", "unit": "count", "alert": 5},
+    {"metric": "planning_terminal_failures", "unit": "percent", "alert": 5},
+    {"metric": "provider_error_rate", "unit": "percent", "alert": 10},
+    {"metric": "unknown_critical_fact_rate", "unit": "percent", "alert": 25},
+    {"metric": "model_cost_usd", "unit": "USD", "alert": 100},
+    {"metric": "authorization_denials", "unit": "count", "alert": 20},
+    {"metric": "database_connections", "unit": "count", "alert": 80}
+  ]
+}

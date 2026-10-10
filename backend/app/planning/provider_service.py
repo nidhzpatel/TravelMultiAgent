@@ -13,6 +13,7 @@ from app.providers.hotels import HotelRequest
 from app.providers.registry import ProviderRegistry
 from app.providers.search import SearchRequest
 from app.providers.weather import WeatherRequest
+from app.observability.metrics import emit_metrics
 
 
 class ProviderRefreshRequest(BaseModel):
@@ -40,6 +41,7 @@ class ProviderPlanningService:
             if provider_request is None:
                 continue
             run, items = specialist.run(trip_id, trip_version, provider_request, provider)
+            emit_metrics("provider_run", {"ProviderRunCount": 1}, {"kind": run.kind.value, "provider": run.provider, "status": run.status.value})
             self.repository.replace_provider_items(trip_id, trip_version, specialist.kind, run.provider, items)
             self.repository.save_provider_run(run)
         return self.view(trip_id, trip_version)

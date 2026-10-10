@@ -1,0 +1,18 @@
+groups:
+  - name: voyagemind-critical
+    rules:
+      - alert: PlanningQueueStalled
+        expr: planning_queue_oldest_age_seconds > 120
+        for: 10m
+        labels: { severity: critical, owner: platform }
+      - alert: CrossUserAccessSpike
+        expr: increase(authorization_denials_total[5m]) > 20
+        labels: { severity: critical, owner: security }
+      - alert: DatabaseSaturation
+        expr: database_connection_utilization > 0.8
+        for: 5m
+        labels: { severity: critical, owner: platform }
+      - alert: ProviderFailureElevated
+        expr: provider_error_ratio > 0.1
+        for: 15m
+        labels: { severity: warning, owner: travel-data }

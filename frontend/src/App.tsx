@@ -9,11 +9,13 @@ import HomeScreen from './components/HomeScreen'
 import V2ProposalWorkspace from './components/V2ProposalWorkspace'
 import { createChat, sendChatMessage, listChats } from './api'
 import type { ChatSession } from './types'
+import ShareAcceptance from './features/trips/ShareAcceptance'
 
 type Scene = 'prompt' | 'chat'
 
 export default function App() {
   const v2TripId = new URLSearchParams(window.location.search).get('trip_id')
+  const shareToken = new URLSearchParams(window.location.search).get('share_token')
   const [scene, setScene] = useState<Scene>('prompt')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -143,7 +145,7 @@ export default function App() {
 
       <div className="absolute inset-0 z-10 bg-gradient-to-b from-transparent via-[#020617]/40 to-[#020617]/90" />
 
-      {v2TripId ? <V2ProposalWorkspace tripId={v2TripId} /> : <>
+      {shareToken && !v2TripId ? <ShareAcceptance token={shareToken} /> : v2TripId ? <V2ProposalWorkspace tripId={v2TripId} /> : <>
 
       <button
         onClick={() => setSidebarOpen(true)}

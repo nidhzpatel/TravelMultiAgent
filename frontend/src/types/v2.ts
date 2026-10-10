@@ -73,6 +73,7 @@ export interface BudgetBreakdown {
 }
 
 export interface BudgetView {
+  target: Money;
   breakdown: BudgetBreakdown;
   expenses: Expense[];
   evidence: Evidence[];
@@ -230,6 +231,22 @@ export interface PlanningJobEvent {
   created_at: string;
 }
 
+export interface TripMember {
+  user_id: string;
+  role: "OWNER" | "EDITOR" | "VIEWER";
+}
+
+export interface ShareInvitation {
+  id: string;
+  trip_id: string;
+  role: "EDITOR" | "VIEWER";
+  expires_at: string;
+  revoked_at: string | null;
+  accepted_by: string | null;
+  accepted_at: string | null;
+  created_at: string;
+}
+
 export interface Operation {
   kind: "READ" | "ADD" | "REMOVE" | "REPLACE" | "MOVE" | "REORDER" | "REPLAN";
   target_id?: string | null;
@@ -252,6 +269,11 @@ export interface ProposalPreview {
   changed_fields: string[];
   changes: Array<{ entity_id: string; fields: string[] }>;
 }
+
+export type TripMessageResponse =
+  | { status: "read"; message: string; version: number }
+  | { status: "clarifying"; message: string }
+  | ({ status: "proposal" } & ProposalPreview);
 
 export type ProviderItemKind = "SEARCH" | "WEATHER" | "FLIGHT" | "HOTEL";
 

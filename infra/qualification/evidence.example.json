@@ -1,0 +1,14 @@
+{
+  "release_candidate": "git-sha",
+  "performed_at": null,
+  "staging_e2e": {"passed": false, "artifact": null},
+  "accessibility": {"passed": false, "artifact": null},
+  "load_test": {"passed": false, "p95_ms": null, "artifact": null},
+  "security_scan": {"passed": false, "critical_findings": null, "artifact": null},
+  "restore_drill": {"passed": false, "rpo_seconds": null, "rto_seconds": null, "artifact": null},
+  "migration_rollback": {"passed": false, "artifact": null},
+  "provider_coverage": {"passed": false, "market": null, "coverage_percent": null, "artifact": null},
+  "worker_recovery": {"passed": false, "artifact": null},
+  "quality_benchmark": {"passed": false, "version": "1.0.0", "artifact": null},
+  "operational_owner": {"passed": false, "team": null, "on_call": null}
+}

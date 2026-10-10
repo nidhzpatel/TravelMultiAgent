@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0",
+  "rpo_max_seconds": 900,
+  "rto_max_seconds": 14400,
+  "required": ["staging_e2e", "accessibility", "load_test", "security_scan", "restore_drill", "migration_rollback", "provider_coverage", "worker_recovery", "quality_benchmark", "operational_owner"]
+}

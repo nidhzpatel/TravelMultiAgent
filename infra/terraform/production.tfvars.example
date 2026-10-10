@@ -1,0 +1,15 @@
+environment = "production"
+aws_region = "ap-south-1"
+private_subnet_ids = ["subnet-replace-a", "subnet-replace-b"]
+service_security_group_ids = ["sg-replace"]
+database_subnet_ids = ["subnet-replace-a", "subnet-replace-b"]
+database_security_group_ids = ["sg-database-replace"]
+api_image = "registry.example/voyagemind-api:sha"
+worker_image = "registry.example/voyagemind-api:sha"
+frontend_image = "registry.example/voyagemind-frontend:sha"
+database_url_secret_arn = "arn:aws:secretsmanager:region:account:secret:replace"
+session_secret_arn = "arn:aws:secretsmanager:region:account:secret:replace"
+oidc_issuer = "https://identity.example"
+oidc_audience = "voyagemind-production"
+oidc_jwks_url = "https://identity.example/.well-known/jwks.json"
+alarm_topic_arn = "arn:aws:sns:region:account:replace"

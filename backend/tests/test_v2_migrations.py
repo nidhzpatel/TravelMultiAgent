@@ -20,6 +20,7 @@ class V2MigrationTests(unittest.TestCase):
             self.assertIn("CREATE TABLE provider_runs", target.read_text())
             self.assertIn("CREATE TABLE planning_jobs", target.read_text())
             self.assertIn("CREATE TABLE planning_job_events", target.read_text())
+            self.assertIn("CREATE TABLE trip_shares", target.read_text())
             down = subprocess.run(
                 [sys.executable, "-m", "alembic", "-c", str(backend / "alembic.ini"), "downgrade", "head:base", "--sql"],
                 cwd=backend, env=environment, capture_output=True, text=True, check=True,
