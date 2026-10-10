@@ -73,10 +73,10 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Build non-root backend image
         uses: docker/build-push-action@v6
-        with: { context: backend, push: false, tags: voyagemind-api:${{ github.sha }} }
+        with: { context: backend, push: false, tags: 'voyagemind-api:${{ github.sha }}' }
       - name: Build non-root frontend image
         uses: docker/build-push-action@v6
-        with: { context: frontend, push: false, tags: voyagemind-frontend:${{ github.sha }} }
+        with: { context: frontend, push: false, tags: 'voyagemind-frontend:${{ github.sha }}' }
 
   supply-chain:
     name: Dependency, secret, IaC and SBOM checks
