@@ -97,7 +97,7 @@ jobs:
         working-directory: frontend
         run: npm ci && npm audit --omit=dev --audit-level=critical
       - name: Secret and IaC scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with: { scan-type: fs, scan-ref: ., scanners: 'secret,misconfig', severity: CRITICAL, exit-code: '1' }
       - name: Validate infrastructure
         working-directory: infra/terraform
